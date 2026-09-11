@@ -16,32 +16,38 @@ void UClimateSystem::BeginPlay()
 void UClimateSystem::ProcessChunkClimate(FChunkData& OutChunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params)
 {
     float ChunkWorldSize = (Params.ChunkSize - 1) * 50.0f;
-    for (int32 i = 0; i < OutChunk.MicroCells.Num(); i++) {
-        int32 X = i % Params.ChunkSize; int32 Y = i / Params.ChunkSize;
-        float WorldX = (ChunkCoord.X * ChunkWorldSize) + (X * 50.0f);
-        float WorldY = (ChunkCoord.Y * ChunkWorldSize) + (Y * 50.0f);
+    
+    // OPTIMALIZACE: Nested loops
+    for (int32 Y = 0; Y < Params.ChunkSize; Y++) {
+        for (int32 X = 0; X < Params.ChunkSize; X++) {
+            int32 i = X + Y * Params.ChunkSize;
+            if (i >= OutChunk.MicroCells.Num()) continue;
 
-        float Altitude = FMath::Max(0.0f, OutChunk.MicroCells[i].Elevation - Params.SeaLevel);
-        float AltPenalty = (Altitude / 100.0f) * 1.5f * Params.TemperatureScale;
+            float WorldX = (ChunkCoord.X * ChunkWorldSize) + (X * 50.0f);
+            float WorldY = (ChunkCoord.Y * ChunkWorldSize) + (Y * 50.0f);
 
-        float BaseT = Params.BaseTemperature + (FMath::PerlinNoise2D(FVector2D(WorldX * 0.001f, WorldY * 0.001f)) * 5.0f);
-        OutChunk.MicroCells[i].Temperature = BaseT - AltPenalty;
+            float Altitude = FMath::Max(0.0f, OutChunk.MicroCells[i].Elevation - Params.SeaLevel);
+            float AltPenalty = (Altitude / 100.0f) * 1.5f * Params.TemperatureScale;
 
-        float BaseH = Params.GlobalHumidityRate + (FMath::PerlinNoise2D(FVector2D(WorldY * 0.002f, WorldX * 0.002f)) * 0.5f);
-        if (OutChunk.MicroCells[i].Elevation <= Params.SeaLevel) BaseH += 0.5f;
-        OutChunk.MicroCells[i].Humidity = FMath::Clamp(BaseH, 0.0f, 1.0f);
+            float BaseT = Params.BaseTemperature + (FMath::PerlinNoise2D(FVector2D(WorldX * 0.001f, WorldY * 0.001f)) * 5.0f);
+            OutChunk.MicroCells[i].Temperature = BaseT - AltPenalty;
 
-        OutChunk.MicroCells[i].Rainfall = OutChunk.MicroCells[i].Humidity * Params.GlobalRainfall;
-        OutChunk.MicroCells[i].Wetness = 0.0f;
-        OutChunk.MicroCells[i].CloudDensity = 0.0f;
-        OutChunk.MicroCells[i].AshDensity = 0.0f;
-        OutChunk.MicroCells[i].AshDensityBuffer = 0.0f;
+            float BaseH = Params.GlobalHumidityRate + (FMath::PerlinNoise2D(FVector2D(WorldY * 0.002f, WorldX * 0.002f)) * 0.5f);
+            if (OutChunk.MicroCells[i].Elevation <= Params.SeaLevel) BaseH += 0.5f;
+            OutChunk.MicroCells[i].Humidity = FMath::Clamp(BaseH, 0.0f, 1.0f);
 
-        if (OutChunk.MicroCells[i].Temperature <= 0.0f) {
-            OutChunk.MicroCells[i].SnowAmount = FMath::Min(5.0f, FMath::Abs(OutChunk.MicroCells[i].Temperature) * 0.5f);
-        }
-        else {
-            OutChunk.MicroCells[i].SnowAmount = 0.0f;
+            OutChunk.MicroCells[i].Rainfall = OutChunk.MicroCells[i].Humidity * Params.GlobalRainfall;
+            OutChunk.MicroCells[i].Wetness = 0.0f;
+            OutChunk.MicroCells[i].CloudDensity = 0.0f;
+            OutChunk.MicroCells[i].AshDensity = 0.0f;
+            OutChunk.MicroCells[i].AshDensityBuffer = 0.0f;
+
+            if (OutChunk.MicroCells[i].Temperature <= 0.0f) {
+                OutChunk.MicroCells[i].SnowAmount = FMath::Min(5.0f, FMath::Abs(OutChunk.MicroCells[i].Temperature) * 0.5f);
+            }
+            else {
+                OutChunk.MicroCells[i].SnowAmount = 0.0f;
+            }
         }
     }
 }
@@ -76,7 +82,6 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
     TArray<uint8> SafeFlags1;
     SafeFlags1.Init(0, EndIdx - StartIdx);
 
-    // FÁZE 4: Thread-safe buffery pro výpoèet odpaøování a deštì pro daný slice
     TArray<float> LocalEvaporationBuffer;
     LocalEvaporationBuffer.Init(0.0f, EndIdx - StartIdx);
     TArray<float> LocalRainfallBuffer;
@@ -88,7 +93,6 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
         return FMath::Lerp(top, bot, ty);
         };
 
-    // Urèíme globální multiplikátor mrakù z dostupného atmosférického zásobníku
     float AvailableMoistureFactor = FMath::Clamp(GlobalAtmosphericMoisture / 500000.0f, 0.1f, 1.5f);
 
     ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
@@ -131,150 +135,152 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
         float ChunkEvaporated = 0.0f;
         float ChunkRained = 0.0f;
 
-        for (int i = 0; i < Chunk.MicroCells.Num(); i++) {
-            FCellData& Cell = Chunk.MicroCells[i];
-            int32 X = i % Manager->ChunkSize;
-            int32 Y = i / Manager->ChunkSize;
-            int32 GlobalX = (ChunkKeys[idx].X * (Manager->ChunkSize - 1)) + X;
-            int32 GlobalY = (ChunkKeys[idx].Y * (Manager->ChunkSize - 1)) + Y;
+        // OPTIMALIZACE: Nested loops
+        for (int32 Y = 0; Y < Manager->ChunkSize; Y++) {
+            for (int32 X = 0; X < Manager->ChunkSize; X++) {
+                int32 i = X + Y * Manager->ChunkSize;
+                if (i >= Chunk.MicroCells.Num()) continue;
 
-            float OldCloud = Cell.CloudDensity;
-            float OldRain = Cell.Rainfall;
-            float OldSnow = Cell.SnowAmount;
-            float OldIce = Cell.GlacierIce;
-            float OldHumidity = Cell.Humidity;
+                FCellData& Cell = Chunk.MicroCells[i];
+                int32 GlobalX = (ChunkKeys[idx].X * (Manager->ChunkSize - 1)) + X;
+                int32 GlobalY = (ChunkKeys[idx].Y * (Manager->ChunkSize - 1)) + Y;
 
-            float Altitude = FMath::Max(0.0f, Cell.Elevation - Manager->SeaLevel);
-            float AltPenalty = (Altitude / 100.0f) * 1.5f * Manager->TemperatureScale;
-            Cell.Temperature = Manager->BaseTemperature + SeasonTempOffset - AltPenalty + CosmicIrradiance;
+                float OldCloud = Cell.CloudDensity;
+                float OldRain = Cell.Rainfall;
+                float OldSnow = Cell.SnowAmount;
+                float OldIce = Cell.GlacierIce;
+                float OldHumidity = Cell.Humidity;
 
-            if (CosmicRadiation > 0.0f && Cell.Elevation > Manager->SeaLevel && Cell.CloudDensity < 0.2f) {
-                Cell.DangerLevel = FMath::Clamp(Cell.DangerLevel + (CosmicRadiation * 0.01f), 0.0f, 1.0f);
-            }
+                float Altitude = FMath::Max(0.0f, Cell.Elevation - Manager->SeaLevel);
+                float AltPenalty = (Altitude / 100.0f) * 1.5f * Manager->TemperatureScale;
+                Cell.Temperature = Manager->BaseTemperature + SeasonTempOffset - AltPenalty + CosmicIrradiance;
 
-            float Evaporation = 0.0f;
-            if (Cell.Elevation <= Manager->SeaLevel || Cell.WaterType == EWaterType::Ocean) Evaporation = 1.0f;
-            else if (Cell.WaterType == EWaterType::Lake) Evaporation = 0.75f;
-            else if (Cell.WaterType == EWaterType::River || Cell.RiverDischarge > 0.5f || Cell.SurfaceWater > 0.1f) Evaporation = 0.4f;
-            else if (Cell.Biome == EBiomeType::Swamp) Evaporation = 0.3f;
-            else Evaporation = (Cell.Wetness * 0.15f) + (Cell.GroundWater / 100.0f * 0.02f);
-
-            float Transpiration = 0.0f;
-            if (Cell.TreeType != ETreeType::None) Transpiration += 0.2f;
-            if (Cell.Biome == EBiomeType::Swamp) Transpiration += 0.3f;
-            Transpiration += Cell.FloraDensity * 0.1f;
-
-            // FÁZE 4: Sbìr odpaøené vody do atmosféry
-            float TempEvapMultiplier = FMath::Max(0.1f, (Cell.Temperature + 10.0f) / 30.0f);
-            ChunkEvaporated += (Evaporation + Transpiration) * TempEvapMultiplier;
-
-            int32 gx = FMath::Min(X / StepSize, GridSegments - 1);
-            int32 gy = FMath::Min(Y / StepSize, GridSegments - 1);
-            float tx = (float)(X - (gx * StepSize)) / StepSize;
-            float ty = (float)(Y - (gy * StepSize)) / StepSize;
-
-            float AmbientNoiseLocal = BiLerp(NoiseAmbient[gy][gx], NoiseAmbient[gy][gx + 1], NoiseAmbient[gy + 1][gx], NoiseAmbient[gy + 1][gx + 1], tx, ty);
-
-            float TempFactor = FMath::Clamp((Cell.Temperature + 15.0f) / 45.0f, 0.2f, 1.5f);
-            float TargetHumidity = Manager->GlobalHumidityRate * 0.3f + ((Evaporation + Transpiration) * TempFactor);
-            Cell.Humidity = FMath::Lerp(Cell.Humidity, FMath::Clamp(TargetHumidity + AmbientNoiseLocal, 0.0f, 1.0f), 0.05f);
-
-            float InterpMacro = BiLerp(NoiseMacro[gy][gx], NoiseMacro[gy][gx + 1], NoiseMacro[gy + 1][gx], NoiseMacro[gy + 1][gx + 1], tx, ty);
-            float CloudMask = FMath::SmoothStep(0.45f, 0.65f, InterpMacro);
-            float CloudBase = 0.0f;
-
-            if (CloudMask > 0.0f) {
-                float InterpDetail = BiLerp(NoiseDetail[gy][gx], NoiseDetail[gy][gx + 1], NoiseDetail[gy + 1][gx], NoiseDetail[gy + 1][gx + 1], tx, ty);
-                CloudBase = InterpDetail * CloudMask * Manager->CloudCoverageMultiplier;
-
-                if (Cell.SurfaceWater > 0.0f) CloudBase += 0.25f * CloudMask;
-                if (Cell.Elevation > Manager->SeaLevel + 500.0f) CloudBase += 0.20f * CloudMask;
-                if (Cell.TreeType != ETreeType::None) CloudBase += 0.10f * CloudMask;
-            }
-
-            // FÁZE 4: Omezení tvorby mrakù a deštì na základì vody v atmosféøe
-            CloudBase *= FMath::Lerp(1.0f, SeasonRainMultiplier, 0.6f) * AvailableMoistureFactor;
-
-            if (SeasonRainMultiplier < 0.8f) {
-                if (Cell.Elevation < Manager->SeaLevel + 300.0f) {
-                    float InterpStorm = BiLerp(NoiseStorm[gy][gx], NoiseStorm[gy][gx + 1], NoiseStorm[gy + 1][gx], NoiseStorm[gy + 1][gx + 1], tx, ty);
-                    if (InterpStorm > 0.85f) CloudBase += 1.5f;
+                if (CosmicRadiation > 0.0f && Cell.Elevation > Manager->SeaLevel && Cell.CloudDensity < 0.2f) {
+                    Cell.DangerLevel = FMath::Clamp(Cell.DangerLevel + (CosmicRadiation * 0.01f), 0.0f, 1.0f);
                 }
-                float InterpCumulus = BiLerp(NoiseCumulus[gy][gx], NoiseCumulus[gy][gx + 1], NoiseCumulus[gy + 1][gx], NoiseCumulus[gy + 1][gx + 1], tx, ty);
-                if (InterpCumulus > 0.75f) CloudBase = FMath::Max(CloudBase, Manager->CloudDensityThreshold + 0.05f);
-            }
 
-            float NewRainfall = 0.0f;
-            float RainThreshold = Manager->CloudDensityThreshold + 0.15f;
-            if (CloudBase > RainThreshold) {
-                NewRainfall = (CloudBase - RainThreshold) * 3.5f * Manager->GlobalRainfall * SeasonRainMultiplier;
-            }
-            float NewCloudDensity = FMath::Max(0.0f, CloudBase - (NewRainfall * 0.45f));
+                float Evaporation = 0.0f;
+                if (Cell.Elevation <= Manager->SeaLevel || Cell.WaterType == EWaterType::Ocean) Evaporation = 1.0f;
+                else if (Cell.WaterType == EWaterType::Lake) Evaporation = 0.75f;
+                else if (Cell.WaterType == EWaterType::River || Cell.RiverDischarge > 0.5f || Cell.SurfaceWater > 0.1f) Evaporation = 0.4f;
+                else if (Cell.Biome == EBiomeType::Swamp) Evaporation = 0.3f;
+                else Evaporation = (Cell.Wetness * 0.15f) + (Cell.GroundWater / 100.0f * 0.02f);
 
-            if (Cell.Temperature <= 0.0f) {
-                Cell.SnowAmount += NewRainfall;
-                ChunkRained += NewRainfall; // Výpoèet odebrané vody z oblak
-                NewRainfall = 0.0f;
-                if (Cell.SnowAmount < 10.0f) Cell.SnowAmount += Cell.Humidity * 0.05f;
+                float Transpiration = 0.0f;
+                if (Cell.TreeType != ETreeType::None) Transpiration += 0.2f;
+                if (Cell.Biome == EBiomeType::Swamp) Transpiration += 0.3f;
+                Transpiration += Cell.FloraDensity * 0.1f;
 
-                if (Cell.SnowAmount > 5.0f) {
-                    float SnowPressure = (Cell.SnowAmount - 5.0f) * 0.02f;
-                    float MaxGlacier = 100.0f;
-                    float GrowthSpace = FMath::Max(0.0f, 1.0f - (Cell.GlacierIce / MaxGlacier));
+                float TempEvapMultiplier = FMath::Max(0.1f, (Cell.Temperature + 10.0f) / 30.0f);
+                ChunkEvaporated += (Evaporation + Transpiration) * TempEvapMultiplier;
 
-                    float IceFormed = SnowPressure * GrowthSpace;
-                    IceFormed = FMath::Min(IceFormed, Cell.SnowAmount * 0.1f);
+                int32 gx = FMath::Min(X / StepSize, GridSegments - 1);
+                int32 gy = FMath::Min(Y / StepSize, GridSegments - 1);
+                float tx = (float)(X - (gx * StepSize)) / StepSize;
+                float ty = (float)(Y - (gy * StepSize)) / StepSize;
 
-                    Cell.SnowAmount -= IceFormed;
-                    Cell.GlacierIce += IceFormed;
+                float AmbientNoiseLocal = BiLerp(NoiseAmbient[gy][gx], NoiseAmbient[gy][gx + 1], NoiseAmbient[gy + 1][gx], NoiseAmbient[gy + 1][gx + 1], tx, ty);
+
+                float TempFactor = FMath::Clamp((Cell.Temperature + 15.0f) / 45.0f, 0.2f, 1.5f);
+                float TargetHumidity = Manager->GlobalHumidityRate * 0.3f + ((Evaporation + Transpiration) * TempFactor);
+                Cell.Humidity = FMath::Lerp(Cell.Humidity, FMath::Clamp(TargetHumidity + AmbientNoiseLocal, 0.0f, 1.0f), 0.05f);
+
+                float InterpMacro = BiLerp(NoiseMacro[gy][gx], NoiseMacro[gy][gx + 1], NoiseMacro[gy + 1][gx], NoiseMacro[gy + 1][gx + 1], tx, ty);
+                float CloudMask = FMath::SmoothStep(0.45f, 0.65f, InterpMacro);
+                float CloudBase = 0.0f;
+
+                if (CloudMask > 0.0f) {
+                    float InterpDetail = BiLerp(NoiseDetail[gy][gx], NoiseDetail[gy][gx + 1], NoiseDetail[gy + 1][gx], NoiseDetail[gy + 1][gx + 1], tx, ty);
+                    CloudBase = InterpDetail * CloudMask * Manager->CloudCoverageMultiplier;
+
+                    if (Cell.SurfaceWater > 0.0f) CloudBase += 0.25f * CloudMask;
+                    if (Cell.Elevation > Manager->SeaLevel + 500.0f) CloudBase += 0.20f * CloudMask;
+                    if (Cell.TreeType != ETreeType::None) CloudBase += 0.10f * CloudMask;
                 }
-            }
-            else {
-                ChunkRained += NewRainfall;
 
-                if (Cell.SnowAmount > 0.0f) {
-                    float MeltAmount = FMath::Min(Cell.SnowAmount, Cell.Temperature * 0.05f);
-                    Cell.SnowAmount -= MeltAmount;
-                    NewRainfall += MeltAmount;
-                    Cell.Wetness = FMath::Min(1.0f, Cell.Wetness + MeltAmount);
+                CloudBase *= FMath::Lerp(1.0f, SeasonRainMultiplier, 0.6f) * AvailableMoistureFactor;
+
+                if (SeasonRainMultiplier < 0.8f) {
+                    if (Cell.Elevation < Manager->SeaLevel + 300.0f) {
+                        float InterpStorm = BiLerp(NoiseStorm[gy][gx], NoiseStorm[gy][gx + 1], NoiseStorm[gy + 1][gx], NoiseStorm[gy + 1][gx + 1], tx, ty);
+                        if (InterpStorm > 0.85f) CloudBase += 1.5f;
+                    }
+                    float InterpCumulus = BiLerp(NoiseCumulus[gy][gx], NoiseCumulus[gy][gx + 1], NoiseCumulus[gy + 1][gx], NoiseCumulus[gy + 1][gx + 1], tx, ty);
+                    if (InterpCumulus > 0.75f) CloudBase = FMath::Max(CloudBase, Manager->CloudDensityThreshold + 0.05f);
                 }
-                else if (Cell.GlacierIce > 0.0f) {
-                    float IceMeltAmount = FMath::Min(Cell.GlacierIce, Cell.Temperature * 0.02f);
-                    Cell.GlacierIce -= IceMeltAmount;
-                    NewRainfall += IceMeltAmount;
-                    Cell.Wetness = FMath::Min(1.0f, Cell.Wetness + IceMeltAmount);
+
+                float NewRainfall = 0.0f;
+                float RainThreshold = Manager->CloudDensityThreshold + 0.15f;
+                if (CloudBase > RainThreshold) {
+                    NewRainfall = (CloudBase - RainThreshold) * 3.5f * Manager->GlobalRainfall * SeasonRainMultiplier;
                 }
-            }
+                float NewCloudDensity = FMath::Max(0.0f, CloudBase - (NewRainfall * 0.45f));
 
-            if (NewRainfall > 0.05f && Cell.Elevation > Manager->SeaLevel) {
-                Cell.Wetness = FMath::Min(1.0f, Cell.Wetness + (NewRainfall * 0.8f));
-            }
-            else if (Cell.Elevation > Manager->SeaLevel) {
-                float EvaporationRate = FMath::Clamp(Cell.Temperature / 80.0f, 0.02f, 0.1f);
-                Cell.Wetness = FMath::Max(0.0f, Cell.Wetness - EvaporationRate);
-            }
-            else {
-                Cell.Wetness = 1.0f;
-            }
+                if (Cell.Temperature <= 0.0f) {
+                    Cell.SnowAmount += NewRainfall;
+                    ChunkRained += NewRainfall;
+                    NewRainfall = 0.0f;
+                    if (Cell.SnowAmount < 10.0f) Cell.SnowAmount += Cell.Humidity * 0.05f;
 
-            if (FMath::Abs(NewCloudDensity - OldCloud) > 0.1f || FMath::Abs(NewRainfall - OldRain) > 0.1f) bCloudDirty = true;
-            if (FMath::Abs(Cell.SnowAmount - OldSnow) > 0.25f || FMath::Abs(Cell.GlacierIce - OldIce) > 0.5f || FMath::Abs(Cell.Humidity - OldHumidity) > 0.15f) {
-                bTerrainDirty = true;
-                if (FMath::Abs(Cell.SnowAmount - OldSnow) > 0.35f || FMath::Abs(Cell.GlacierIce - OldIce) > 1.0f) bFloraDirty = true;
-                Chunk.bWeatherChanged = true;
+                    if (Cell.SnowAmount > 5.0f) {
+                        float SnowPressure = (Cell.SnowAmount - 5.0f) * 0.02f;
+                        float MaxGlacier = 100.0f;
+                        float GrowthSpace = FMath::Max(0.0f, 1.0f - (Cell.GlacierIce / MaxGlacier));
+
+                        float IceFormed = SnowPressure * GrowthSpace;
+                        IceFormed = FMath::Min(IceFormed, Cell.SnowAmount * 0.1f);
+
+                        Cell.SnowAmount -= IceFormed;
+                        Cell.GlacierIce += IceFormed;
+                    }
+                }
+                else {
+                    ChunkRained += NewRainfall;
+
+                    if (Cell.SnowAmount > 0.0f) {
+                        float MeltAmount = FMath::Min(Cell.SnowAmount, Cell.Temperature * 0.05f);
+                        Cell.SnowAmount -= MeltAmount;
+                        NewRainfall += MeltAmount;
+                        Cell.Wetness = FMath::Min(1.0f, Cell.Wetness + MeltAmount);
+                    }
+                    else if (Cell.GlacierIce > 0.0f) {
+                        float IceMeltAmount = FMath::Min(Cell.GlacierIce, Cell.Temperature * 0.02f);
+                        Cell.GlacierIce -= IceMeltAmount;
+                        NewRainfall += IceMeltAmount;
+                        Cell.Wetness = FMath::Min(1.0f, Cell.Wetness + IceMeltAmount);
+                    }
+                }
+
+                if (NewRainfall > 0.05f && Cell.Elevation > Manager->SeaLevel) {
+                    Cell.Wetness = FMath::Min(1.0f, Cell.Wetness + (NewRainfall * 0.8f));
+                }
+                else if (Cell.Elevation > Manager->SeaLevel) {
+                    float EvaporationRate = FMath::Clamp(Cell.Temperature / 80.0f, 0.02f, 0.1f);
+                    Cell.Wetness = FMath::Max(0.0f, Cell.Wetness - EvaporationRate);
+                }
+                else {
+                    Cell.Wetness = 1.0f;
+                }
+
+                if (FMath::Abs(NewCloudDensity - OldCloud) > 0.1f || FMath::Abs(NewRainfall - OldRain) > 0.1f) bCloudDirty = true;
+                if (FMath::Abs(Cell.SnowAmount - OldSnow) > 0.25f || FMath::Abs(Cell.GlacierIce - OldIce) > 0.5f || FMath::Abs(Cell.Humidity - OldHumidity) > 0.15f) {
+                    bTerrainDirty = true;
+                    if (FMath::Abs(Cell.SnowAmount - OldSnow) > 0.35f || FMath::Abs(Cell.GlacierIce - OldIce) > 1.0f) bFloraDirty = true;
+                    Chunk.bWeatherChanged = true;
+                }
+
+                float UpwindAsh = 0.0f;
+                const FCellData* UpwindCell = nullptr;
+                if (Manager->GetCellGlobalPtr(GlobalX + UpX, GlobalY + UpY, UpwindCell)) {
+                    UpwindAsh = UpwindCell->AshDensity;
+                }
+
+                Cell.AshDensityBuffer = FMath::Max(0.0f, UpwindAsh * 0.95f - 0.02f);
+                if (Cell.EruptionDaysRemaining > 0.0f) Cell.AshDensityBuffer = 5.0f;
+
+                Cell.CloudDensity = NewCloudDensity;
+                Cell.Rainfall = NewRainfall;
             }
-
-            float UpwindAsh = 0.0f;
-            const FCellData* UpwindCell = nullptr;
-            if (Manager->GetCellGlobalPtr(GlobalX + UpX, GlobalY + UpY, UpwindCell)) {
-                UpwindAsh = UpwindCell->AshDensity;
-            }
-
-            Cell.AshDensityBuffer = FMath::Max(0.0f, UpwindAsh * 0.95f - 0.02f);
-            if (Cell.EruptionDaysRemaining > 0.0f) Cell.AshDensityBuffer = 5.0f;
-
-            Cell.CloudDensity = NewCloudDensity;
-            Cell.Rainfall = NewRainfall;
         }
 
         LocalEvaporationBuffer[iter] = ChunkEvaporated;
@@ -285,12 +291,10 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
         if (bFloraDirty) SafeFlags1[iter] |= EChunkVisualDirty::Flora;
         });
 
-    // FÁZE 4: Aplikace atmosférického kolobìhu v hlavním vláknì
     for (int32 i = 0; i < (EndIdx - StartIdx); i++) {
         GlobalAtmosphericMoisture += LocalEvaporationBuffer[i] * 10.0f;
         GlobalAtmosphericMoisture -= LocalRainfallBuffer[i] * 50.0f;
     }
-    // Nepovolíme absolutní sucho nebo pøeteèení zásobníku
     GlobalAtmosphericMoisture = FMath::Clamp(GlobalAtmosphericMoisture, 10000.0f, 2000000.0f);
 
     for (int32 iter = 0; iter < (EndIdx - StartIdx); iter++) {

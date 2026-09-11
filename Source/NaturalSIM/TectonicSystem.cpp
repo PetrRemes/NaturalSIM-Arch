@@ -47,7 +47,6 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
 
         float EarthquakeThreshold = 100.0f;
 
-        // FÁZE 2: Jen naplníme PendingEarthquakes pro pozdìjší plánování
         if (Chunk.FaultStress >= EarthquakeThreshold) {
             float Overstress = Chunk.FaultStress - EarthquakeThreshold;
             float Intensity = 0.5f + (Overstress * 0.05f) + FMath::FRandRange(0.0f, 0.8f);
@@ -80,116 +79,120 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             return bestP;
             };
 
-        for (int i = 0; i < Chunk.MicroCells.Num(); i++) {
-            int32 X = i % Manager->ChunkSize;
-            int32 Y = i / Manager->ChunkSize;
-            if (X >= CSize || Y >= CSize) continue;
+        // OPTIMALIZACE: Nested loops
+        for (int32 Y = 0; Y < CSize; Y++) {
+            for (int32 X = 0; X < CSize; X++) {
+                int32 i = X + Y * Manager->ChunkSize;
+                if (i >= Chunk.MicroCells.Num()) continue;
 
-            FCellData& Cell = Chunk.MicroCells[i];
-            int32 GlobalX = (ChunkKeys[idx].X * CSize) + X;
-            int32 GlobalY = (ChunkKeys[idx].Y * CSize) + Y;
+                FCellData& Cell = Chunk.MicroCells[i];
+                int32 GlobalX = (ChunkKeys[idx].X * CSize) + X;
+                int32 GlobalY = (ChunkKeys[idx].Y * CSize) + Y;
 
-            if (Cell.bIsVolcano) {
-                Cell.MagmaPressure += (TidalMultiplier * Manager->VolcanicActivity * 3.0f * DeltaDays);
+                if (Cell.bIsVolcano) {
+                    Cell.MagmaPressure += (TidalMultiplier * Manager->VolcanicActivity * 3.0f * DeltaDays);
 
-                if (Cell.EruptionDaysRemaining > 0.0f) {
-                    Cell.EruptionDaysRemaining -= DeltaDays;
+                    if (Cell.EruptionDaysRemaining > 0.0f) {
+                        Cell.EruptionDaysRemaining -= DeltaDays;
 
-                    float EruptionIntensity = FMath::Clamp(Cell.MagmaPressure / 300.0f, 0.5f, 10.0f);
-                    float MagmaReleased = FMath::Min(Cell.MagmaPressure, 150.0f * EruptionIntensity * DeltaDays);
-                    Cell.MagmaPressure -= MagmaReleased;
+                        float EruptionIntensity = FMath::Clamp(Cell.MagmaPressure / 300.0f, 0.5f, 10.0f);
+                        float MagmaReleased = FMath::Min(Cell.MagmaPressure, 150.0f * EruptionIntensity * DeltaDays);
+                        Cell.MagmaPressure -= MagmaReleased;
 
-                    float LavaOutput = MagmaReleased * 0.9f;
+                        float LavaOutput = MagmaReleased * 0.9f;
 
-                    Cell.Lava += LavaOutput;
-                    Cell.DangerLevel = 1.0f;
-                    Cell.Temperature += 150.0f;
-                    Cell.AshDensityBuffer += (MagmaReleased * 0.1f) * DeltaDays;
+                        Cell.Lava += LavaOutput;
+                        Cell.DangerLevel = 1.0f;
+                        Cell.Temperature += 150.0f;
+                        Cell.AshDensityBuffer += (MagmaReleased * 0.1f) * DeltaDays;
 
-                    if (Cell.EruptionDaysRemaining <= 0.0f || Cell.MagmaPressure <= 0.0f) {
-                        Cell.EruptionDaysRemaining = 0.0f;
-                    }
-                    bTerrainDirty = true;
-                    bCloudDirty = true;
-                }
-                else if (Cell.MagmaPressure > 1000.0f && FMath::FRand() < 0.05f) {
-                    Cell.EruptionDaysRemaining = FMath::FRandRange(10.0f, 30.0f);
-                    bTerrainDirty = true;
-                }
-            }
-
-            float MyLavaDelta = 0.0f;
-            float MyHead = Cell.Elevation + Cell.Lava;
-
-            FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY);
-
-            if (TargetFlow.X != GlobalX || TargetFlow.Y != GlobalY) {
-                const FCellData* TargetCell = nullptr;
-                Manager->GetCellGlobalPtr(TargetFlow.X, TargetFlow.Y, TargetCell);
-                if (TargetCell) {
-                    float TargetHead = TargetCell->Elevation + TargetCell->Lava;
-                    float Diff = MyHead - TargetHead;
-
-                    float Transfer = FMath::Min(Cell.Lava, Diff * 5.0f * DeltaDays);
-                    Transfer = FMath::Min(Transfer, Cell.Lava * 0.9f);
-                    MyLavaDelta -= Transfer;
-                }
-            }
-
-            for (int32 n = 0; n < 8; n++) {
-                int32 nx = GlobalX + Offsets[n][0];
-                int32 ny = GlobalY + Offsets[n][1];
-
-                const FCellData* NCell = nullptr;
-                Manager->GetCellGlobalPtr(nx, ny, NCell);
-
-                if (NCell && NCell->Lava > 0.0f) {
-                    FIntPoint NeighborTarget = GetLowestNeighbor(nx, ny);
-                    if (NeighborTarget.X == GlobalX && NeighborTarget.Y == GlobalY) {
-                        float nHead = NCell->Elevation + NCell->Lava;
-                        float Diff = nHead - MyHead;
-                        float Transfer = FMath::Min(NCell->Lava, Diff * 5.0f * DeltaDays);
-                        Transfer = FMath::Min(Transfer, NCell->Lava * 0.9f);
-                        MyLavaDelta += Transfer;
-                    }
-                }
-            }
-            Cell.LavaBuffer = FMath::Max(0.0f, Cell.Lava + MyLavaDelta);
-        }
-
-        for (int i = 0; i < Chunk.MicroCells.Num(); i++) {
-            int32 X = i % Manager->ChunkSize;
-            int32 Y = i / Manager->ChunkSize;
-            if (X >= CSize || Y >= CSize) continue;
-
-            FCellData& Cell = Chunk.MicroCells[i];
-
-            if (Cell.LavaBuffer > 0.0f) {
-                float CoolingRate = FMath::Lerp(2.0f, 0.01f, FMath::Clamp(Cell.LavaBuffer / 20.0f, 0.0f, 1.0f));
-                float Cooling = FMath::Min(Cell.LavaBuffer, CoolingRate * DeltaDays);
-
-                Cell.LavaBuffer -= Cooling;
-
-                float HardenedRock = Cooling * 0.8f;
-                Cell.Elevation += HardenedRock;
-                Chunk.AccumulatedTerrainChange += HardenedRock;
-
-                if (Cell.LavaBuffer > 5.0f && Cell.Bedrock != EBedrockType::Rock) {
-                    float Melting = 1.5f * DeltaDays;
-                    Cell.Elevation -= Melting;
-                    Chunk.AccumulatedTerrainChange += Melting;
-                }
-
-                Cell.SoilFertility = FMath::Min(1.0f, Cell.SoilFertility + Cooling * 0.05f);
-                Cell.MineralOre += Cooling * 50.0f;
-
-                if (Cell.LavaBuffer > 0.1f) {
-                    if (Cell.FloraDensity > 0.0f || Cell.TreeType != ETreeType::None) {
-                        Cell.FireIntensity = 1.0f;
+                        if (Cell.EruptionDaysRemaining <= 0.0f || Cell.MagmaPressure <= 0.0f) {
+                            Cell.EruptionDaysRemaining = 0.0f;
+                        }
+                        bTerrainDirty = true;
                         bCloudDirty = true;
                     }
-                    Cell.SurfaceWater = 0.0f;
-                    Cell.Bedrock = EBedrockType::Rock;
+                    else if (Cell.MagmaPressure > 1000.0f && FMath::FRand() < 0.05f) {
+                        Cell.EruptionDaysRemaining = FMath::FRandRange(10.0f, 30.0f);
+                        bTerrainDirty = true;
+                    }
+                }
+
+                float MyLavaDelta = 0.0f;
+                float MyHead = Cell.Elevation + Cell.Lava;
+
+                FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY);
+
+                if (TargetFlow.X != GlobalX || TargetFlow.Y != GlobalY) {
+                    const FCellData* TargetCell = nullptr;
+                    Manager->GetCellGlobalPtr(TargetFlow.X, TargetFlow.Y, TargetCell);
+                    if (TargetCell) {
+                        float TargetHead = TargetCell->Elevation + TargetCell->Lava;
+                        float Diff = MyHead - TargetHead;
+
+                        float Transfer = FMath::Min(Cell.Lava, Diff * 5.0f * DeltaDays);
+                        Transfer = FMath::Min(Transfer, Cell.Lava * 0.9f);
+                        MyLavaDelta -= Transfer;
+                    }
+                }
+
+                for (int32 n = 0; n < 8; n++) {
+                    int32 nx = GlobalX + Offsets[n][0];
+                    int32 ny = GlobalY + Offsets[n][1];
+
+                    const FCellData* NCell = nullptr;
+                    Manager->GetCellGlobalPtr(nx, ny, NCell);
+
+                    if (NCell && NCell->Lava > 0.0f) {
+                        FIntPoint NeighborTarget = GetLowestNeighbor(nx, ny);
+                        if (NeighborTarget.X == GlobalX && NeighborTarget.Y == GlobalY) {
+                            float nHead = NCell->Elevation + NCell->Lava;
+                            float Diff = nHead - MyHead;
+                            float Transfer = FMath::Min(NCell->Lava, Diff * 5.0f * DeltaDays);
+                            Transfer = FMath::Min(Transfer, NCell->Lava * 0.9f);
+                            MyLavaDelta += Transfer;
+                        }
+                    }
+                }
+                Cell.LavaBuffer = FMath::Max(0.0f, Cell.Lava + MyLavaDelta);
+            }
+        }
+
+        // OPTIMALIZACE: Nested loops
+        for (int32 Y = 0; Y < CSize; Y++) {
+            for (int32 X = 0; X < CSize; X++) {
+                int32 i = X + Y * Manager->ChunkSize;
+                if (i >= Chunk.MicroCells.Num()) continue;
+
+                FCellData& Cell = Chunk.MicroCells[i];
+
+                if (Cell.LavaBuffer > 0.0f) {
+                    float CoolingRate = FMath::Lerp(2.0f, 0.01f, FMath::Clamp(Cell.LavaBuffer / 20.0f, 0.0f, 1.0f));
+                    float Cooling = FMath::Min(Cell.LavaBuffer, CoolingRate * DeltaDays);
+
+                    Cell.LavaBuffer -= Cooling;
+
+                    float HardenedRock = Cooling * 0.8f;
+                    Cell.Elevation += HardenedRock;
+                    Chunk.AccumulatedTerrainChange += HardenedRock;
+
+                    if (Cell.LavaBuffer > 5.0f && Cell.Bedrock != EBedrockType::Rock) {
+                        float Melting = 1.5f * DeltaDays;
+                        Cell.Elevation -= Melting;
+                        Chunk.AccumulatedTerrainChange += Melting;
+                    }
+
+                    Cell.SoilFertility = FMath::Min(1.0f, Cell.SoilFertility + Cooling * 0.05f);
+                    Cell.MineralOre += Cooling * 50.0f;
+
+                    if (Cell.LavaBuffer > 0.1f) {
+                        if (Cell.FloraDensity > 0.0f || Cell.TreeType != ETreeType::None) {
+                            Cell.FireIntensity = 1.0f;
+                            bCloudDirty = true;
+                        }
+                        Cell.SurfaceWater = 0.0f;
+                        Cell.Bedrock = EBedrockType::Rock;
+                    }
                 }
             }
         }
@@ -228,7 +231,6 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
         }
     }
 
-    // FÁZE 2: Pøedání otøesu Disaster Systému (místo okamžité exploze)
     for (const TPair<FIntPoint, float>& EQ : PendingEarthquakes) {
         float Radius = 2000.0f + (EQ.Value * 1500.0f);
         FVector2D EpicenterLoc(EQ.Key.X * (Manager->ChunkSize - 1) * 50.0f, EQ.Key.Y * (Manager->ChunkSize - 1) * 50.0f);
@@ -239,7 +241,7 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             Warning.Epicenter = EpicenterLoc;
             Warning.Severity = EQ.Value;
             Warning.Radius = Radius;
-            Warning.DaysToImpact = FMath::FRandRange(1.0f, 4.0f); // Náhodné varování 1-4 dny pøed dopadem
+            Warning.DaysToImpact = FMath::FRandRange(1.0f, 4.0f);
             Manager->DisasterModule->ActiveWarnings.Add(Warning);
         }
 

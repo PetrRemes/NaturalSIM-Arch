@@ -25,7 +25,8 @@ static void GetZonedTerrain(float GlobalX, float GlobalY, const FChunkGeneration
         float RadiusMult = (Params.ContinentCount <= 2) ? 1.2f : (1.8f / FMath::Sqrt((float)FMath::Max(1, Params.ContinentCount))) * SizeStream.FRandRange(0.6f, 1.6f);
 
         FVector2D EffCenter = Params.Continents[i].OriginCenter + (Params.Continents[i].DriftDirection * (Params.TectonicShift / 50.0f) * ShiftMultiplier);
-        float D = FVector2D::Distance(FVector2D(WarpedX, WarpedY), EffCenter) / FMath::Max(0.1f, RadiusMult);
+        float D = FVector2D::DistSquared(FVector2D(WarpedX, WarpedY), EffCenter); // OPTIMALIZACE: DistSquared pro rychlé porovnání
+        D = FMath::Sqrt(D) / FMath::Max(0.1f, RadiusMult);
 
         if (D < Dist1) { Dist2 = Dist1; Dist1 = D; }
         else if (D < Dist2) { Dist2 = D; }
@@ -147,10 +148,13 @@ static void GetZonedTerrain(float GlobalX, float GlobalY, const FChunkGeneration
                     float VolcZoneNoise = GetFBM(VolcX, VolcY, Params.NoiseScale * 0.8f, 3, Params.MapSeed + 500);
                     if (VolcZoneNoise < 0.55f) continue;
 
-                    float Dist = FVector2D::Distance(FVector2D(GlobalX, GlobalY), FVector2D(VolcX, VolcY));
+                    // OPTIMALIZACE: Rychlý squared check pøed odmocninou
+                    float DistSq = FVector2D::DistSquared(FVector2D(GlobalX, GlobalY), FVector2D(VolcX, VolcY));
                     float VolcRadius = 25.0f;
+                    float VolcRadiusSq = VolcRadius * VolcRadius;
 
-                    if (Dist <= VolcRadius) {
+                    if (DistSq <= VolcRadiusSq) {
+                        float Dist = FMath::Sqrt(DistSq);
                         float Falloff = FMath::SmoothStep(0.0f, 1.0f, 1.0f - (Dist / VolcRadius));
                         Elev += (Params.LavaHeightBoost * Falloff);
 
@@ -180,71 +184,76 @@ void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D 
     int32 ChunkSize = FMath::RoundToInt(FMath::Sqrt((float)OutChunk.MicroCells.Num()));
     float TotalTectPressure = 0.0f;
 
-    for (int32 i = 0; i < OutChunk.MicroCells.Num(); i++)
+    // OPTIMALIZACE: Odstranìno pomalé dìlení a modulo uvnitø obøí smyèky
+    for (int32 Y = 0; Y < ChunkSize; Y++)
     {
-        int32 X = i % ChunkSize; int32 Y = i / ChunkSize;
-        FCellData& Cell = OutChunk.MicroCells[i];
+        for (int32 X = 0; X < ChunkSize; X++)
+        {
+            int32 i = X + Y * ChunkSize;
+            if (i >= OutChunk.MicroCells.Num()) continue;
 
-        float GlobalX = (ChunkCoord.X * (ChunkSize - 1)) + X;
-        float GlobalY = (ChunkCoord.Y * (ChunkSize - 1)) + Y;
+            FCellData& Cell = OutChunk.MicroCells[i];
 
-        bool bIsVolcano = false;
-        float Elevation = 0.0f;
-        float TectonicPressure = 0.0f;
-        float LavaAmount = 0.0f;
+            float GlobalX = (ChunkCoord.X * (ChunkSize - 1)) + X;
+            float GlobalY = (ChunkCoord.Y * (ChunkSize - 1)) + Y;
 
-        GetZonedTerrain(GlobalX, GlobalY, Params, Elevation, bIsVolcano, TectonicPressure, LavaAmount);
+            bool bIsVolcano = false;
+            float Elevation = 0.0f;
+            float TectonicPressure = 0.0f;
+            float LavaAmount = 0.0f;
 
-        Cell.Elevation = Elevation;
-        Cell.bIsVolcano = bIsVolcano;
-        Cell.Lava = LavaAmount;
-        TotalTectPressure += TectonicPressure;
+            GetZonedTerrain(GlobalX, GlobalY, Params, Elevation, bIsVolcano, TectonicPressure, LavaAmount);
 
-        if (bIsVolcano || Cell.Lava > 0.1f) {
-            if (bIsVolcano) Cell.Lava = 100.0f;
-            Cell.Bedrock = EBedrockType::Rock;
-        }
-        else {
-            Cell.Bedrock = (Cell.Elevation > Params.SeaLevel + 300.0f) ? EBedrockType::Rock : EBedrockType::Dirt;
-        }
+            Cell.Elevation = Elevation;
+            Cell.bIsVolcano = bIsVolcano;
+            Cell.Lava = LavaAmount;
+            TotalTectPressure += TectonicPressure;
 
-        // OPRAVA: Pláže vráceny do bezpeèné vzdálenosti 25 jednotek nad moøem jako ve starém kódu
-        if (Cell.Elevation <= Params.SeaLevel + 25.0f && Cell.Elevation >= Params.SeaLevel - 15.0f) {
-            Cell.Bedrock = EBedrockType::Sand;
-        }
+            if (bIsVolcano || Cell.Lava > 0.1f) {
+                if (bIsVolcano) Cell.Lava = 100.0f;
+                Cell.Bedrock = EBedrockType::Rock;
+            }
+            else {
+                Cell.Bedrock = (Cell.Elevation > Params.SeaLevel + 300.0f) ? EBedrockType::Rock : EBedrockType::Dirt;
+            }
 
-        Cell.StoneAmount = 0.0f;
-        Cell.MineralOre = 0.0f;
-        Cell.ClayAmount = 0.0f;
-        Cell.SandAmount = 0.0f;
+            if (Cell.Elevation <= Params.SeaLevel + 25.0f && Cell.Elevation >= Params.SeaLevel - 15.0f) {
+                Cell.Bedrock = EBedrockType::Sand;
+            }
 
-        if (Cell.Bedrock == EBedrockType::Rock) {
-            float StoneNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 8.0f, 3, Params.MapSeed + 111);
-            float BaseStone = FMath::Max(0.0f, Cell.Elevation - (Params.SeaLevel + 200.0f));
-            Cell.StoneAmount = 5000.0f + (BaseStone * 15.0f) + (StoneNoise * 2000.0f);
-        }
+            Cell.StoneAmount = 0.0f;
+            Cell.MineralOre = 0.0f;
+            Cell.ClayAmount = 0.0f;
+            Cell.SandAmount = 0.0f;
 
-        float OreNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 25.0f, 2, Params.MapSeed + 888);
-        float OreThreshold = FMath::Lerp(0.92f, 0.70f, TectonicPressure);
-        if (Cell.bIsVolcano) OreThreshold -= 0.15f;
+            if (Cell.Bedrock == EBedrockType::Rock) {
+                float StoneNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 8.0f, 3, Params.MapSeed + 111);
+                float BaseStone = FMath::Max(0.0f, Cell.Elevation - (Params.SeaLevel + 200.0f));
+                Cell.StoneAmount = 5000.0f + (BaseStone * 15.0f) + (StoneNoise * 2000.0f);
+            }
 
-        if (OreNoise > OreThreshold) {
-            Cell.MineralOre = (OreNoise - OreThreshold) * 15000.0f;
-        }
+            float OreNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 25.0f, 2, Params.MapSeed + 888);
+            float OreThreshold = FMath::Lerp(0.92f, 0.70f, TectonicPressure);
+            if (Cell.bIsVolcano) OreThreshold -= 0.15f;
 
-        if (Cell.Bedrock == EBedrockType::Sand) {
-            float SandNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 5.0f, 2, Params.MapSeed + 666);
-            Cell.SandAmount = 2000.0f + (SandNoise * 1500.0f);
-        }
+            if (OreNoise > OreThreshold) {
+                Cell.MineralOre = (OreNoise - OreThreshold) * 15000.0f;
+            }
 
-        if (Cell.Bedrock == EBedrockType::Dirt && Cell.Elevation < Params.SeaLevel + 60.0f && Cell.Elevation > Params.SeaLevel) {
-            float ClayNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 4.0f, 3, Params.MapSeed + 555);
-            if (ClayNoise > 0.65f) {
-                Cell.ClayAmount = (ClayNoise - 0.65f) * 8000.0f;
+            if (Cell.Bedrock == EBedrockType::Sand) {
+                float SandNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 5.0f, 2, Params.MapSeed + 666);
+                Cell.SandAmount = 2000.0f + (SandNoise * 1500.0f);
+            }
+
+            if (Cell.Bedrock == EBedrockType::Dirt && Cell.Elevation < Params.SeaLevel + 60.0f && Cell.Elevation > Params.SeaLevel) {
+                float ClayNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 4.0f, 3, Params.MapSeed + 555);
+                if (ClayNoise > 0.65f) {
+                    Cell.ClayAmount = (ClayNoise - 0.65f) * 8000.0f;
+                }
             }
         }
     }
 
     OutChunk.BaseTectonicPressure = TotalTectPressure / OutChunk.MicroCells.Num();
     OutChunk.FaultStress = FMath::FRandRange(0.0f, 50.0f);
-}  
+}
