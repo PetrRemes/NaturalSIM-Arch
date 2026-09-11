@@ -190,10 +190,10 @@ void ASimWorldManager::SyncChunkEdges(const TSet<FIntPoint>& ActiveChunks) {
     }
 }
 
-// OPRAVA OPTIMALIZACE: Už žádné iterování pøes miliony bunìk kvùli ohni. Kontrolují se pouze rychlé flagy.
 void ASimWorldManager::UpdateActiveRegions() {
-    ActiveChunkKeys.Empty();
-    StableChunkKeys.Empty();
+    // OPTIMALIZACE: Ponecháme kapacitu polí, zabrání se realokacím RAM
+    ActiveChunkKeys.Empty(WorldChunks.Num());
+    StableChunkKeys.Empty(WorldChunks.Num());
 
     for (FIntPoint Key : CachedChunkKeys) {
         FChunkData& Chunk = WorldChunks[Key];
@@ -486,7 +486,6 @@ void ASimWorldManager::GenerateChunk(FIntPoint ChunkCoordinate, bool bIsFullGene
         });
 }
 
-// OPRAVA VODY: Vyšší threshold (10.0f) zabrání neustálému zbyteènému pøekreslování drobných zmìn vodní hladiny
 void ASimWorldManager::UpdateDynamicMeshes() {
     if (bIsGenerating || bCurrentQueueIsFullGeneration) return;
 
@@ -654,6 +653,7 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
         }
     }
 
+    // OPTIMALIZACE: Nested loops a DistSquared pro drastické urychlení zemìtøesení
     for (int32 cy = EpicenterChunkCoord.Y - ChunkRadius; cy <= EpicenterChunkCoord.Y + ChunkRadius; cy++) {
         for (int32 cx = EpicenterChunkCoord.X - ChunkRadius; cx <= EpicenterChunkCoord.X + ChunkRadius; cx++) {
             FIntPoint Coord(cx, cy);
@@ -661,36 +661,42 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
             if (FChunkData* Chunk = WorldChunks.Find(Coord)) {
                 bool bChunkAffected = false;
 
-                for (int i = 0; i < Chunk->MicroCells.Num(); i++) {
-                    FCellData& Cell = Chunk->MicroCells[i];
-                    int32 X = i % ChunkSize;
-                    int32 Y = i / ChunkSize;
+                for (int32 Y = 0; Y < ChunkSize; Y++) {
+                    for (int32 X = 0; X < ChunkSize; X++) {
+                        int32 i = X + Y * ChunkSize;
+                        if (i >= Chunk->MicroCells.Num()) continue;
 
-                    FVector2D CellGlobalPos((cx * (ChunkSize - 1) + X) * CellSize, (cy * (ChunkSize - 1) + Y) * CellSize);
-                    float Dist = FVector2D::Distance(GlobalEpicenter, CellGlobalPos);
+                        FCellData& Cell = Chunk->MicroCells[i];
 
-                    if (Dist <= Radius) {
-                        bChunkAffected = true;
-                        Chunk->FaultStress *= FMath::FRandRange(0.0f, 0.2f);
+                        FVector2D CellGlobalPos((cx * (ChunkSize - 1) + X) * CellSize, (cy * (ChunkSize - 1) + Y) * CellSize);
 
-                        float Falloff = FMath::Pow(1.0f - (Dist / Radius), 2.0f);
-                        float LocalIntensity = Intensity * Falloff;
+                        float DistSq = FVector2D::DistSquared(GlobalEpicenter, CellGlobalPos);
+                        float RadiusSq = Radius * Radius;
 
-                        float Shake = FMath::FRandRange(-1.0f, 1.0f) * LocalIntensity * 1.5f;
+                        if (DistSq <= RadiusSq) {
+                            bChunkAffected = true;
+                            Chunk->FaultStress *= FMath::FRandRange(0.0f, 0.2f);
 
-                        Cell.Elevation += Shake;
-                        Cell.DangerLevel = FMath::Min(1.0f, Cell.DangerLevel + LocalIntensity * 2.0f);
+                            float Dist = FMath::Sqrt(DistSq); // Drahá odmocnina se volá jen pro buòky, které jsou skuteènì zasaženy
+                            float Falloff = FMath::Pow(1.0f - (Dist / Radius), 2.0f);
+                            float LocalIntensity = Intensity * Falloff;
 
-                        if (LocalIntensity > 0.7f) {
-                            Cell.HouseDensity *= 0.5f;
-                            if (FMath::FRand() < 0.2f) Cell.bHasRoad = false;
-                            if (FMath::FRand() < 0.3f) Cell.BuildingType = EBuildingType::None;
-                            if (Cell.TreeType != ETreeType::None && FMath::FRand() < 0.1f) {
-                                Cell.TreeType = ETreeType::None;
-                                Cell.WoodAmount = 0.0f;
+                            float Shake = FMath::FRandRange(-1.0f, 1.0f) * LocalIntensity * 1.5f;
+
+                            Cell.Elevation += Shake;
+                            Cell.DangerLevel = FMath::Min(1.0f, Cell.DangerLevel + LocalIntensity * 2.0f);
+
+                            if (LocalIntensity > 0.7f) {
+                                Cell.HouseDensity *= 0.5f;
+                                if (FMath::FRand() < 0.2f) Cell.bHasRoad = false;
+                                if (FMath::FRand() < 0.3f) Cell.BuildingType = EBuildingType::None;
+                                if (Cell.TreeType != ETreeType::None && FMath::FRand() < 0.1f) {
+                                    Cell.TreeType = ETreeType::None;
+                                    Cell.WoodAmount = 0.0f;
+                                }
                             }
+                            Chunk->AccumulatedTerrainChange += FMath::Abs(Shake) * 0.5f;
                         }
-                        Chunk->AccumulatedTerrainChange += FMath::Abs(Shake) * 0.5f;
                     }
                 }
 
