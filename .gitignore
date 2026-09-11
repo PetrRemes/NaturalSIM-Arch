@@ -1,0 +1,10 @@
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+.vs/
+*.sln
+
+# Ignorovat velké mapy (pøesahující limit GitHubu 100 MB)
+*.umap

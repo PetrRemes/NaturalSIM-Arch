@@ -1,0 +1,1 @@
+#include "SimDiplomacyTypes.h"
