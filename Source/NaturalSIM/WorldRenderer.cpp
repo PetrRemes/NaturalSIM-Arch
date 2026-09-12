@@ -7,6 +7,7 @@
 #include "FloraSystem.h"
 #include "TransportSystem.h" 
 #include "DisasterSystem.h"
+#include "Async/Async.h"
 
 UWorldRenderer::UWorldRenderer()
 {
@@ -89,6 +90,66 @@ void UWorldRenderer::ClearAllMeshes() {
     if (RainHISM) RainHISM->ClearInstances();
     if (FogHISM) FogHISM->ClearInstances();
     if (DisasterHISM) DisasterHISM->ClearInstances();
+}
+
+void UWorldRenderer::SyncHISM(UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors)
+{
+    if (!HISM) return;
+    int32 NeededCount = Transforms.Num();
+    int32 CurrentCount = HISM->GetInstanceCount();
+
+    if (NeededCount > CurrentCount) {
+        TArray<FTransform> MissingTransforms;
+        MissingTransforms.SetNumUninitialized(NeededCount - CurrentCount);
+
+        FTransform SafeT;
+        SafeT.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
+        SafeT.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
+        SafeT.SetRotation(FQuat::Identity);
+
+        for (int32 i = 0; i < MissingTransforms.Num(); i++) {
+            MissingTransforms[i] = SafeT;
+        }
+        HISM->AddInstances(MissingTransforms, false);
+        CurrentCount = NeededCount;
+    }
+
+    TArray<FTransform> BatchTransforms;
+    BatchTransforms.SetNumUninitialized(CurrentCount);
+
+    for (int32 i = 0; i < NeededCount; i++) {
+        FTransform T = Transforms[i];
+        if (T.GetScale3D().IsNearlyZero()) T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
+        if (T.ContainsNaN()) {
+            T.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
+            T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
+            T.SetRotation(FQuat::Identity);
+        }
+        BatchTransforms[i] = T;
+    }
+
+    FTransform HiddenTransform;
+    HiddenTransform.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
+    HiddenTransform.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
+    HiddenTransform.SetRotation(FQuat::Identity);
+
+    for (int32 i = NeededCount; i < CurrentCount; i++) {
+        BatchTransforms[i] = HiddenTransform;
+    }
+
+    if (CurrentCount > 0) {
+        HISM->BatchUpdateInstancesTransforms(0, BatchTransforms, true, true);
+    }
+
+    for (int32 i = 0; i < NeededCount; i++) {
+        if (Colors.IsValidIndex(i)) {
+            HISM->SetCustomDataValue(i, 0, Colors[i].R, false);
+            HISM->SetCustomDataValue(i, 1, Colors[i].G, false);
+            HISM->SetCustomDataValue(i, 2, Colors[i].B, false);
+        }
+    }
+
+    HISM->MarkRenderStateDirty();
 }
 
 FLinearColor UWorldRenderer::GetHeatmapColor(const FCellStaticData& SCell, const FCellDynamicData& DCell, EWorldViewMode ViewMode)
@@ -437,187 +498,372 @@ void UWorldRenderer::RenderChunk_GameThread(TSharedPtr<FChunkMeshData> MeshData,
     WorldManager->NotifyChunkRendered();
 }
 
+// OPTIMALIZACE 7: Extrémnì drahý výpoèet poèasí a Perlinova šumu pøesunut na asynchronní vlákno
 void UWorldRenderer::UpdateWeatherEntities()
 {
-    if (!WorldManager) return;
+    if (!WorldManager || WorldManager->bIsGenerating) return;
 
-    TArray<FTransform> CloudTransforms;
-    TArray<FLinearColor> CloudColors;
-    TArray<FTransform> RainTransforms;
-    TArray<FLinearColor> RainColors;
-    TArray<FTransform> FogTransforms;
-    TArray<FLinearColor> FogColors;
-
-    float CellSize = 50.0f;
-    float CloudDensityThreshold = WorldManager->CloudDensityThreshold;
+    struct FWeatherData {
+        TArray<FTransform> CloudTransforms; TArray<FLinearColor> CloudColors;
+        TArray<FTransform> RainTransforms;  TArray<FLinearColor> RainColors;
+        TArray<FTransform> FogTransforms;   TArray<FLinearColor> FogColors;
+    };
+    TSharedPtr<FWeatherData> WD = MakeShared<FWeatherData>();
 
     float SeasonAlpha = (WorldManager->CurrentDay / 365.0f) * PI * 2.0f;
     FVector2D GlobalWind(FMath::Cos(SeasonAlpha), FMath::Sin(SeasonAlpha));
     GlobalWind.Normalize();
 
-    for (const auto& Pair : WorldManager->WorldChunks) {
-        const FChunkData& Chunk = Pair.Value;
-        FVector2D ChunkCoord = FVector2D(Pair.Key.X, Pair.Key.Y);
-        int32 ChunkSize = WorldManager->ChunkSize;
-        float ChunkWorldSize = (ChunkSize - 1) * CellSize;
+    float SeaLevel = WorldManager->SeaLevel;
+    float CloudDensityThreshold = WorldManager->CloudDensityThreshold;
+    int32 ChunkSize = WorldManager->ChunkSize;
+    int32 Step = WorldManager->CloudResolutionStep;
 
-        int32 Step = WorldManager->CloudResolutionStep;
+    TWeakObjectPtr<UWorldRenderer> WeakThis(this);
+    TWeakObjectPtr<ASimWorldManager> WeakManager(WorldManager);
+
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, WeakManager, WD, GlobalWind, SeaLevel, CloudDensityThreshold, ChunkSize, Step]() {
+        if (!WeakManager.IsValid()) return;
+        ASimWorldManager* Manager = WeakManager.Get();
+
+        float CellSize = 50.0f;
         float HalfStep = (CellSize * Step) * 0.5f;
         float CloudScaleXY = (HalfStep * 1.9f) / 100.0f;
 
-        for (int32 Y = 0; Y < ChunkSize - 1; Y += Step) {
-            for (int32 X = 0; X < ChunkSize - 1; X += Step) {
-                int32 Index = X + (Y * ChunkSize);
-                if (!Chunk.StaticCells.IsValidIndex(Index)) continue;
+        for (const auto& Pair : Manager->WorldChunks) {
+            const FChunkData& Chunk = Pair.Value;
+            FVector2D ChunkCoord = FVector2D(Pair.Key.X, Pair.Key.Y);
+            float ChunkWorldSize = (ChunkSize - 1) * CellSize;
 
-                const FCellStaticData& SCell = Chunk.StaticCells[Index];
-                const FCellDynamicData& DCell = Chunk.DynamicCells[Index];
+            for (int32 Y = 0; Y < ChunkSize - 1; Y += Step) {
+                for (int32 X = 0; X < ChunkSize - 1; X += Step) {
+                    int32 Index = X + (Y * ChunkSize);
+                    if (!Chunk.StaticCells.IsValidIndex(Index)) continue;
 
-                float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
-                float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
-                float VisualCloudDensity = DCell.CloudDensity;
-                float VisualRainfall = DCell.Rainfall;
-                bool bHasAsh = DCell.AshDensity > 0.05f;
+                    const FCellStaticData& SCell = Chunk.StaticCells[Index];
+                    const FCellDynamicData& DCell = Chunk.DynamicCells[Index];
 
-                if (SCell.Elevation > WorldManager->SeaLevel && VisualRainfall < 0.01f && !bHasAsh) {
-                    int32 WakeX = FMath::Clamp(X + FMath::RoundToInt(GlobalWind.X * 12.0f), 0, ChunkSize - 1);
-                    int32 WakeY = FMath::Clamp(Y + FMath::RoundToInt(GlobalWind.Y * 12.0f), 0, ChunkSize - 1);
-                    float WakeRain = Chunk.DynamicCells[WakeX + WakeY * ChunkSize].Rainfall;
+                    float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
+                    float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
+                    float VisualCloudDensity = DCell.CloudDensity;
+                    float VisualRainfall = DCell.Rainfall;
+                    bool bHasAsh = DCell.AshDensity > 0.05f;
 
-                    if (WakeRain > 0.15f) {
-                        float FogNoise = FMath::PerlinNoise2D(FVector2D(LocalX * 0.001f, LocalY * 0.001f));
-                        if (FogNoise > -0.2f) {
-                            float FogAlpha = FMath::Clamp(WakeRain * 0.4f * (FogNoise + 0.5f), 0.0f, 0.35f);
-                            if (FogAlpha > 0.05f) {
-                                FVector FogCenter(LocalX, LocalY, SCell.Elevation + DCell.GlacierIce + 10.0f + HalfStep);
-                                FogTransforms.Add(FTransform(FRotator::ZeroRotator, FogCenter, FVector(CloudScaleXY * 0.98f)));
-                                FogColors.Add(FLinearColor(0.95f, 0.95f, 0.95f, FogAlpha));
+                    if (SCell.Elevation > SeaLevel && VisualRainfall < 0.01f && !bHasAsh) {
+                        int32 WakeX = FMath::Clamp(X + FMath::RoundToInt(GlobalWind.X * 12.0f), 0, ChunkSize - 1);
+                        int32 WakeY = FMath::Clamp(Y + FMath::RoundToInt(GlobalWind.Y * 12.0f), 0, ChunkSize - 1);
+                        float WakeRain = Chunk.DynamicCells[WakeX + WakeY * ChunkSize].Rainfall;
+
+                        if (WakeRain > 0.15f) {
+                            float FogNoise = FMath::PerlinNoise2D(FVector2D(LocalX * 0.001f, LocalY * 0.001f));
+                            if (FogNoise > -0.2f) {
+                                float FogAlpha = FMath::Clamp(WakeRain * 0.4f * (FogNoise + 0.5f), 0.0f, 0.35f);
+                                if (FogAlpha > 0.05f) {
+                                    FVector FogCenter(LocalX, LocalY, SCell.Elevation + DCell.GlacierIce + 10.0f + HalfStep);
+                                    WD->FogTransforms.Add(FTransform(FRotator::ZeroRotator, FogCenter, FVector(CloudScaleXY * 0.98f)));
+                                    WD->FogColors.Add(FLinearColor(0.95f, 0.95f, 0.95f, FogAlpha));
+                                }
                             }
                         }
                     }
-                }
 
-                if (VisualCloudDensity < CloudDensityThreshold && !bHasAsh && DCell.EruptionDaysRemaining <= 0.0f) continue;
+                    if (VisualCloudDensity < CloudDensityThreshold && !bHasAsh && DCell.EruptionDaysRemaining <= 0.0f) continue;
 
-                float TerrenZ = FMath::Max(0.0f, SCell.Elevation + DCell.GlacierIce - WorldManager->SeaLevel);
-                float CloudBaseZ = WorldManager->SeaLevel + 1200.0f + (TerrenZ * 0.5f);
+                    float TerrenZ = FMath::Max(0.0f, SCell.Elevation + DCell.GlacierIce - SeaLevel);
+                    float CloudBaseZ = SeaLevel + 1200.0f + (TerrenZ * 0.5f);
 
-                CloudBaseZ += FMath::PerlinNoise2D(FVector2D(LocalX * 0.001f, LocalY * 0.001f)) * 50.0f;
+                    CloudBaseZ += FMath::PerlinNoise2D(FVector2D(LocalX * 0.001f, LocalY * 0.001f)) * 50.0f;
 
-                if (DCell.EruptionDaysRemaining > 0.0f) {
-                    float Z = SCell.Elevation + DCell.GlacierIce + HalfStep;
-                    while (Z < CloudBaseZ) {
-                        CloudTransforms.Add(FTransform(FRotator::ZeroRotator, FVector(LocalX, LocalY, Z), FVector(CloudScaleXY * 1.5f)));
-                        CloudColors.Add(FLinearColor(0.05f, 0.05f, 0.05f, 0.98f));
-                        Z += (HalfStep * 2.0f);
-                    }
-                }
-
-                if (bHasAsh) {
-                    float AshAlpha = FMath::Clamp(DCell.AshDensity / 5.0f, 0.0f, 1.0f);
-                    CloudTransforms.Add(FTransform(FRotator::ZeroRotator, FVector(LocalX, LocalY, CloudBaseZ - HalfStep), FVector(CloudScaleXY * 1.2f)));
-                    CloudColors.Add(FLinearColor(0.12f, 0.10f, 0.10f, AshAlpha * 0.95f));
-                }
-
-                if (VisualCloudDensity >= CloudDensityThreshold) {
-                    float Surplus = VisualCloudDensity - CloudDensityThreshold;
-                    int32 StackCount = 1;
-                    if (Surplus > 0.5f) StackCount = 4;
-                    else if (Surplus > 0.3f) StackCount = 3;
-                    else if (Surplus > 0.1f) StackCount = 2;
-
-                    float Darkening = FMath::Clamp(Surplus * 1.5f, 0.0f, 1.0f);
-                    FLinearColor StormColor = FLinearColor(0.12f, 0.22f, 0.50f, 0.95f);
-                    FLinearColor CloudColor = FMath::Lerp(FLinearColor(1.0f, 1.0f, 1.0f, 0.90f), StormColor, Darkening);
-
-                    for (int z = 0; z < StackCount; z++) {
-                        FVector Center(LocalX, LocalY, CloudBaseZ + (z * HalfStep * 2.0f));
-                        FLinearColor BlockColor = CloudColor * (1.0f - (z * 0.08f));
-                        BlockColor.A = CloudColor.A;
-
-                        CloudTransforms.Add(FTransform(FRotator::ZeroRotator, Center, FVector(CloudScaleXY * 0.95f)));
-                        CloudColors.Add(BlockColor);
+                    if (DCell.EruptionDaysRemaining > 0.0f) {
+                        float Z = SCell.Elevation + DCell.GlacierIce + HalfStep;
+                        while (Z < CloudBaseZ) {
+                            WD->CloudTransforms.Add(FTransform(FRotator::ZeroRotator, FVector(LocalX, LocalY, Z), FVector(CloudScaleXY * 1.5f)));
+                            WD->CloudColors.Add(FLinearColor(0.05f, 0.05f, 0.05f, 0.98f));
+                            Z += (HalfStep * 2.0f);
+                        }
                     }
 
-                    if (VisualRainfall > 0.05f) {
-                        float DropZ = CloudBaseZ - HalfStep;
-                        float RainHeight = DropZ - (SCell.Elevation + DCell.GlacierIce);
-                        FVector RainCenter(LocalX, LocalY, SCell.Elevation + DCell.GlacierIce + (RainHeight * 0.5f));
+                    if (bHasAsh) {
+                        float AshAlpha = FMath::Clamp(DCell.AshDensity / 5.0f, 0.0f, 1.0f);
+                        WD->CloudTransforms.Add(FTransform(FRotator::ZeroRotator, FVector(LocalX, LocalY, CloudBaseZ - HalfStep), FVector(CloudScaleXY * 1.2f)));
+                        WD->CloudColors.Add(FLinearColor(0.12f, 0.10f, 0.10f, AshAlpha * 0.95f));
+                    }
 
-                        float RainScaleZ = RainHeight / 100.0f;
-                        RainTransforms.Add(FTransform(FRotator::ZeroRotator, RainCenter, FVector(CloudScaleXY * 0.4f, CloudScaleXY * 0.4f, RainScaleZ)));
-                        RainColors.Add(FLinearColor(0.6f, 0.7f, 0.9f, FMath::Clamp(VisualRainfall * 0.3f, 0.0f, 0.5f)));
+                    if (VisualCloudDensity >= CloudDensityThreshold) {
+                        float Surplus = VisualCloudDensity - CloudDensityThreshold;
+                        int32 StackCount = 1;
+                        if (Surplus > 0.5f) StackCount = 4;
+                        else if (Surplus > 0.3f) StackCount = 3;
+                        else if (Surplus > 0.1f) StackCount = 2;
+
+                        float Darkening = FMath::Clamp(Surplus * 1.5f, 0.0f, 1.0f);
+                        FLinearColor StormColor = FLinearColor(0.12f, 0.22f, 0.50f, 0.95f);
+                        FLinearColor CloudColor = FMath::Lerp(FLinearColor(1.0f, 1.0f, 1.0f, 0.90f), StormColor, Darkening);
+
+                        for (int z = 0; z < StackCount; z++) {
+                            FVector Center(LocalX, LocalY, CloudBaseZ + (z * HalfStep * 2.0f));
+                            FLinearColor BlockColor = CloudColor * (1.0f - (z * 0.08f));
+                            BlockColor.A = CloudColor.A;
+
+                            WD->CloudTransforms.Add(FTransform(FRotator::ZeroRotator, Center, FVector(CloudScaleXY * 0.95f)));
+                            WD->CloudColors.Add(BlockColor);
+                        }
+
+                        if (VisualRainfall > 0.05f) {
+                            float DropZ = CloudBaseZ - HalfStep;
+                            float RainHeight = DropZ - (SCell.Elevation + DCell.GlacierIce);
+                            FVector RainCenter(LocalX, LocalY, SCell.Elevation + DCell.GlacierIce + (RainHeight * 0.5f));
+
+                            float RainScaleZ = RainHeight / 100.0f;
+                            WD->RainTransforms.Add(FTransform(FRotator::ZeroRotator, RainCenter, FVector(CloudScaleXY * 0.4f, CloudScaleXY * 0.4f, RainScaleZ)));
+                            WD->RainColors.Add(FLinearColor(0.6f, 0.7f, 0.9f, FMath::Clamp(VisualRainfall * 0.3f, 0.0f, 0.5f)));
+                        }
                     }
                 }
             }
         }
-    }
 
-    auto SyncHISM = [](UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors) {
-        if (!HISM) return;
-        int32 NeededCount = Transforms.Num();
-        int32 CurrentCount = HISM->GetInstanceCount();
-
-        if (NeededCount > CurrentCount) {
-            TArray<FTransform> MissingTransforms;
-            MissingTransforms.SetNumUninitialized(NeededCount - CurrentCount);
-
-            FTransform SafeT;
-            SafeT.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-            SafeT.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            SafeT.SetRotation(FQuat::Identity);
-
-            for (int32 i = 0; i < MissingTransforms.Num(); i++) {
-                MissingTransforms[i] = SafeT;
+        AsyncTask(ENamedThreads::GameThread, [WeakThis, WD]() {
+            if (WeakThis.IsValid()) {
+                WeakThis->SyncHISM(WeakThis->CloudHISM, WD->CloudTransforms, WD->CloudColors);
+                WeakThis->SyncHISM(WeakThis->RainHISM, WD->RainTransforms, WD->RainColors);
+                WeakThis->SyncHISM(WeakThis->FogHISM, WD->FogTransforms, WD->FogColors);
             }
-            HISM->AddInstances(MissingTransforms, false);
-            CurrentCount = NeededCount;
-        }
+            });
+        });
+}
 
-        TArray<FTransform> BatchTransforms;
-        BatchTransforms.SetNumUninitialized(CurrentCount);
+// OPTIMALIZACE 7: Výpoèet instancí Mìst a zvíøat kompletnì pøesunut do pozadí
+void UWorldRenderer::UpdateFastEntities()
+{
+    if (!WorldManager || WorldManager->bIsGenerating) return;
 
-        for (int32 i = 0; i < NeededCount; i++) {
-            FTransform T = Transforms[i];
+    TArray<FAnimalData> AnimalsCopy;
+    if (WorldManager->FaunaModule) AnimalsCopy = WorldManager->FaunaModule->Animals;
 
-            if (T.GetScale3D().IsNearlyZero()) {
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            }
-            if (T.ContainsNaN()) {
-                T.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-                T.SetRotation(FQuat::Identity);
-            }
-            BatchTransforms[i] = T;
-        }
+    TArray<FTribeData> TribesCopy;
+    if (WorldManager->HumanModule) TribesCopy = WorldManager->HumanModule->Tribes;
 
-        FTransform HiddenTransform;
-        HiddenTransform.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-        HiddenTransform.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-        HiddenTransform.SetRotation(FQuat::Identity);
+    TWeakObjectPtr<UWorldRenderer> WeakThis(this);
+    TWeakObjectPtr<ASimWorldManager> WeakManager(WorldManager);
 
-        for (int32 i = NeededCount; i < CurrentCount; i++) {
-            BatchTransforms[i] = HiddenTransform;
-        }
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, WeakManager, AnimalsCopy, TribesCopy]() {
+        if (!WeakManager.IsValid()) return;
+        ASimWorldManager* Manager = WeakManager.Get();
 
-        if (CurrentCount > 0) {
-            HISM->BatchUpdateInstancesTransforms(0, BatchTransforms, true, true);
-        }
+        TArray<FTransform> FaunaTransforms; TArray<FLinearColor> FaunaColors;
+        TArray<FTransform> HumanTransforms; TArray<FLinearColor> HumanColors;
 
-        for (int32 i = 0; i < NeededCount; i++) {
-            if (Colors.IsValidIndex(i)) {
-                HISM->SetCustomDataValue(i, 0, Colors[i].R, false);
-                HISM->SetCustomDataValue(i, 1, Colors[i].G, false);
-                HISM->SetCustomDataValue(i, 2, Colors[i].B, false);
+        for (const FAnimalData& Animal : AnimalsCopy) {
+            if (Animal.HerdSize <= 0.0f) continue;
+            FCellStaticData SCell; FCellDynamicData DCell;
+            int32 GX = FMath::FloorToInt(Animal.Position.X / 50.0f);
+            int32 GY = FMath::FloorToInt(Animal.Position.Y / 50.0f);
+
+            if (Manager->GetCellGlobal(GX, GY, SCell, DCell)) {
+                float Scale = (Animal.Type == EAnimalType::Predator) ? 1.5f : 1.0f + (Animal.HerdSize * 0.02f);
+                FVector Loc(Animal.Position.X, Animal.Position.Y, SCell.Elevation + DCell.GlacierIce + 25.0f);
+                FQuat Rot = FRotationMatrix::MakeFromX(FVector(Animal.TargetDirection.X, Animal.TargetDirection.Y, 0.0f)).ToQuat();
+                FaunaTransforms.Add(FTransform(Rot, Loc, FVector(Scale)));
+
+                if (Animal.Type == EAnimalType::Predator) FaunaColors.Add(FLinearColor(0.8f, 0.1f, 0.1f));
+                else if (Animal.Type == EAnimalType::ForestAnimal) FaunaColors.Add(FLinearColor(0.1f, 0.3f, 0.1f));
+                else FaunaColors.Add(FLinearColor(0.8f, 0.7f, 0.2f));
             }
         }
 
-        HISM->MarkRenderStateDirty();
-        };
+        for (const FTribeData& Tribe : TribesCopy) {
+            if (Tribe.Population <= 0) continue;
+            FCellStaticData SCell; FCellDynamicData DCell;
+            int32 GX = FMath::FloorToInt(Tribe.Position.X / 50.0f);
+            int32 GY = FMath::FloorToInt(Tribe.Position.Y / 50.0f);
 
-    if (CloudHISM) SyncHISM(CloudHISM, CloudTransforms, CloudColors);
-    if (RainHISM) SyncHISM(RainHISM, RainTransforms, RainColors);
-    if (FogHISM) SyncHISM(FogHISM, FogTransforms, FogColors);
+            if (Manager->GetCellGlobal(GX, GY, SCell, DCell)) {
+                float Scale = 1.0f + (Tribe.Population * 0.01f);
+                FVector Loc(Tribe.Position.X, Tribe.Position.Y, SCell.Elevation + DCell.GlacierIce + 30.0f);
+                FVector2D Dir = (Tribe.TargetRegion - Tribe.Position).GetSafeNormal();
+                if (Dir.IsNearlyZero()) Dir = FVector2D(1, 0);
+                FQuat Rot = FRotationMatrix::MakeFromX(FVector(Dir.X, Dir.Y, 0.0f)).ToQuat();
+                HumanTransforms.Add(FTransform(Rot, Loc, FVector(Scale)));
+                HumanColors.Add(Tribe.TribeColor);
+            }
+        }
+
+        AsyncTask(ENamedThreads::GameThread, [WeakThis, FaunaTransforms, FaunaColors, HumanTransforms, HumanColors]() {
+            if (WeakThis.IsValid()) {
+                WeakThis->SyncHISM(WeakThis->FaunaHISM, FaunaTransforms, FaunaColors);
+                WeakThis->SyncHISM(WeakThis->HumanHISM, HumanTransforms, HumanColors);
+                if (WeakThis->WorldManager) {
+                    WeakThis->WorldManager->bFaunaVisualDirty = false;
+                    WeakThis->WorldManager->bHumanVisualDirty = false;
+                }
+            }
+            });
+        });
+}
+
+void UWorldRenderer::UpdateSettlementEntities()
+{
+    if (!WorldManager || WorldManager->bIsGenerating || !WorldManager->SettlementModule) return;
+
+    TArray<FSettlementData> SettlementsCopy = WorldManager->SettlementModule->Settlements;
+    int32 MapSeed = WorldManager->MapSeed;
+    float SeaLevel = WorldManager->SeaLevel;
+
+    TWeakObjectPtr<UWorldRenderer> WeakThis(this);
+    TWeakObjectPtr<ASimWorldManager> WeakManager(WorldManager);
+
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, WeakManager, SettlementsCopy, MapSeed, SeaLevel]() {
+        if (!WeakManager.IsValid()) return;
+        ASimWorldManager* Manager = WeakManager.Get();
+
+        TArray<FTransform> Transforms;
+        TArray<FLinearColor> Colors;
+
+        for (const FSettlementData& City : SettlementsCopy) {
+            if (City.Population <= 0) continue;
+
+            FRandomStream BldStream(FMath::RoundToInt(City.Position.X) * 73 + FMath::RoundToInt(City.Position.Y) * 37);
+
+            int32 PopPerHouse = 50;
+            int32 MaxHouses = FMath::Clamp(FMath::FloorToInt((float)City.Population / PopPerHouse), 1, 150);
+
+            TArray<FVector2D> BuiltHouses;
+            BuiltHouses.Reserve(MaxHouses);
+
+            float HouseRadius = 10.0f;
+            float MaxDist = FMath::Max(20.0f, FMath::Sqrt((float)MaxHouses) * 18.0f);
+
+            for (int h = 0; h < MaxHouses; h++) {
+                for (int attempt = 0; attempt < 25; attempt++) {
+                    float Angle = BldStream.FRandRange(0.0f, PI * 2.0f);
+                    float Dist = BldStream.FRandRange(0.0f, 1.0f) * BldStream.FRandRange(0.0f, 1.0f) * MaxDist;
+                    FVector2D HPos = City.Position + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
+
+                    bool bOverlap = false;
+                    for (const FVector2D& Built : BuiltHouses) {
+                        if (FVector2D::DistSquared(HPos, Built) < HouseRadius * HouseRadius) {
+                            bOverlap = true; break;
+                        }
+                    }
+                    if (bOverlap) continue;
+
+                    int32 GlobalX = FMath::FloorToInt(HPos.X / 50.0f);
+                    int32 GlobalY = FMath::FloorToInt(HPos.Y / 50.0f);
+
+                    FCellStaticData SCell; FCellDynamicData DCell;
+                    if (!Manager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) continue;
+                    if (DCell.SurfaceWater >= 1.0f || SCell.Elevation <= SeaLevel || SCell.Elevation > SeaLevel + 800.0f) continue;
+                    if (DCell.GlacierIce > 0.5f) continue;
+
+                    BuiltHouses.Add(HPos);
+
+                    FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
+                    float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
+                    FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
+
+                    float RandomScale = BldStream.FRandRange(0.15f, 0.25f);
+
+                    Transforms.Add(FTransform(Rot, Loc, FVector(RandomScale)));
+                    Colors.Add(City.Color);
+                    break;
+                }
+            }
+
+            for (FIntPoint Coord : City.ClaimedCells) {
+                FCellStaticData SCell; FCellDynamicData DCell;
+                if (Manager->GetCellGlobal(Coord.X, Coord.Y, SCell, DCell)) {
+                    if (SCell.Elevation <= SeaLevel || DCell.SurfaceWater >= 1.0f) continue;
+
+                    FVector Loc(Coord.X * 50.0f + 25.0f, Coord.Y * 50.0f + 25.0f, SCell.Elevation);
+                    float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
+                    FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
+
+                    if (SCell.BuildingType == EBuildingType::Mine) {
+                        Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
+                        Colors.Add(FLinearColor(0.2f, 0.2f, 0.2f, 1.0f));
+                    }
+                    else if (SCell.BuildingType == EBuildingType::LumberCamp) {
+                        Transforms.Add(FTransform(Rot, Loc, FVector(0.35f)));
+                        Colors.Add(FLinearColor(0.35f, 0.20f, 0.10f, 1.0f));
+                    }
+                    else if (SCell.BuildingType == EBuildingType::Blacksmith) {
+                        Transforms.Add(FTransform(Rot, Loc, FVector(0.4f)));
+                        Colors.Add(FLinearColor(0.3f, 0.05f, 0.05f, 1.0f));
+                    }
+                    else if (SCell.BuildingType == EBuildingType::Market) {
+                        Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
+                        Colors.Add(FLinearColor(0.9f, 0.7f, 0.1f, 1.0f));
+                    }
+                }
+            }
+        }
+
+        AsyncTask(ENamedThreads::GameThread, [WeakThis, Transforms, Colors]() {
+            if (WeakThis.IsValid()) {
+                WeakThis->SyncHISM(WeakThis->SettlementHISM, Transforms, Colors);
+                if (WeakThis->WorldManager) WeakThis->WorldManager->bSettlementVisualDirty = false;
+            }
+            });
+        });
+}
+
+void UWorldRenderer::UpdateTransportEntities()
+{
+    if (!WorldManager || WorldManager->bIsGenerating || !WorldManager->TransportModule) return;
+
+    TArray<FVehicleData> VehiclesCopy = WorldManager->TransportModule->ActiveVehicles;
+    float SeaLevel = WorldManager->SeaLevel;
+
+    TWeakObjectPtr<UWorldRenderer> WeakThis(this);
+    TWeakObjectPtr<ASimWorldManager> WeakManager(WorldManager);
+
+    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, WeakManager, VehiclesCopy, SeaLevel]() {
+        if (!WeakManager.IsValid()) return;
+        ASimWorldManager* Manager = WeakManager.Get();
+
+        TArray<FTransform> CaravanTransforms; TArray<FLinearColor> CaravanColors;
+        TArray<FTransform> ShipTransforms;    TArray<FLinearColor> ShipColors;
+        TArray<FTransform> AirTransforms;     TArray<FLinearColor> AirColors;
+
+        for (const FVehicleData& V : VehiclesCopy) {
+            float Z = SeaLevel;
+            FVector2D Dir = FVector2D(1, 0);
+            if (V.Path.Num() > 1 && V.CurrentPathNode + 1 < V.Path.Num()) {
+                Dir = (V.Path[V.CurrentPathNode + 1] - V.Position).GetSafeNormal();
+                if (Dir.IsNearlyZero()) Dir = FVector2D(1, 0);
+            }
+            FQuat Rot = FRotationMatrix::MakeFromX(FVector(Dir.X, Dir.Y, 0.0f)).ToQuat();
+
+            if (V.Type == EVehicleType::Caravan) {
+                FCellStaticData SCell; FCellDynamicData DCell;
+                int32 GX = FMath::FloorToInt(V.Position.X / 50.0f);
+                int32 GY = FMath::FloorToInt(V.Position.Y / 50.0f);
+                if (Manager->GetCellGlobal(GX, GY, SCell, DCell)) {
+                    Z = SCell.Elevation + DCell.GlacierIce;
+                }
+                CaravanTransforms.Add(FTransform(Rot, FVector(V.Position.X, V.Position.Y, Z + 10.0f), FVector(0.5f)));
+                CaravanColors.Add(FLinearColor(0.6f, 0.4f, 0.2f, 1.0f));
+            }
+            else if (V.Type == EVehicleType::Ship) {
+                ShipTransforms.Add(FTransform(Rot, FVector(V.Position.X, V.Position.Y, Z + 5.0f), FVector(1.0f)));
+                ShipColors.Add(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f));
+            }
+            else if (V.Type == EVehicleType::Airplane) {
+                Z = SeaLevel + 1500.0f;
+                AirTransforms.Add(FTransform(Rot, FVector(V.Position.X, V.Position.Y, Z), FVector(2.0f)));
+                AirColors.Add(FLinearColor(0.9f, 0.9f, 0.9f, 1.0f));
+            }
+        }
+
+        AsyncTask(ENamedThreads::GameThread, [WeakThis, CaravanTransforms, CaravanColors, ShipTransforms, ShipColors, AirTransforms, AirColors]() {
+            if (WeakThis.IsValid()) {
+                WeakThis->SyncHISM(WeakThis->CaravanHISM, CaravanTransforms, CaravanColors);
+                WeakThis->SyncHISM(WeakThis->ShipHISM, ShipTransforms, ShipColors);
+                WeakThis->SyncHISM(WeakThis->AirplaneHISM, AirTransforms, AirColors);
+            }
+            });
+        });
 }
 
 void UWorldRenderer::UpdateDisasterEntities()
@@ -640,440 +886,5 @@ void UWorldRenderer::UpdateDisasterEntities()
         else Colors.Add(FLinearColor(1.0f, 0.8f, 0.0f, 1.0f));
     }
 
-    auto SyncHISM = [](UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors) {
-        if (!HISM) return;
-        int32 NeededCount = Transforms.Num();
-        int32 CurrentCount = HISM->GetInstanceCount();
-
-        if (NeededCount > CurrentCount) {
-            TArray<FTransform> MissingTransforms;
-            MissingTransforms.SetNumUninitialized(NeededCount - CurrentCount);
-
-            FTransform SafeT;
-            SafeT.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-            SafeT.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            SafeT.SetRotation(FQuat::Identity);
-
-            for (int32 i = 0; i < MissingTransforms.Num(); i++) {
-                MissingTransforms[i] = SafeT;
-            }
-            HISM->AddInstances(MissingTransforms, false);
-            CurrentCount = NeededCount;
-        }
-
-        TArray<FTransform> BatchTransforms;
-        BatchTransforms.SetNumUninitialized(CurrentCount);
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            FTransform T = Transforms[i];
-
-            if (T.GetScale3D().IsNearlyZero()) {
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            }
-            if (T.ContainsNaN()) {
-                T.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-                T.SetRotation(FQuat::Identity);
-            }
-            BatchTransforms[i] = T;
-        }
-
-        FTransform HiddenTransform;
-        HiddenTransform.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-        HiddenTransform.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-        HiddenTransform.SetRotation(FQuat::Identity);
-
-        for (int32 i = NeededCount; i < CurrentCount; i++) {
-            BatchTransforms[i] = HiddenTransform;
-        }
-
-        if (CurrentCount > 0) {
-            HISM->BatchUpdateInstancesTransforms(0, BatchTransforms, true, true);
-        }
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            if (Colors.IsValidIndex(i)) {
-                HISM->SetCustomDataValue(i, 0, Colors[i].R, false);
-                HISM->SetCustomDataValue(i, 1, Colors[i].G, false);
-                HISM->SetCustomDataValue(i, 2, Colors[i].B, false);
-            }
-        }
-
-        HISM->MarkRenderStateDirty();
-        };
-
     SyncHISM(DisasterHISM, Transforms, Colors);
-}
-
-void UWorldRenderer::UpdateFastEntities()
-{
-    if (!WorldManager) return;
-
-    auto SyncHISM = [](UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors) {
-        if (!HISM) return;
-        int32 NeededCount = Transforms.Num();
-        int32 CurrentCount = HISM->GetInstanceCount();
-
-        if (NeededCount > CurrentCount) {
-            TArray<FTransform> MissingTransforms;
-            MissingTransforms.SetNumUninitialized(NeededCount - CurrentCount);
-
-            FTransform SafeT;
-            SafeT.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-            SafeT.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            SafeT.SetRotation(FQuat::Identity);
-
-            for (int32 i = 0; i < MissingTransforms.Num(); i++) {
-                MissingTransforms[i] = SafeT;
-            }
-            HISM->AddInstances(MissingTransforms, false);
-            CurrentCount = NeededCount;
-        }
-
-        TArray<FTransform> BatchTransforms;
-        BatchTransforms.SetNumUninitialized(CurrentCount);
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            FTransform T = Transforms[i];
-
-            if (T.GetScale3D().IsNearlyZero()) {
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            }
-            if (T.ContainsNaN()) {
-                T.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-                T.SetRotation(FQuat::Identity);
-            }
-            BatchTransforms[i] = T;
-        }
-
-        FTransform HiddenTransform;
-        HiddenTransform.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-        HiddenTransform.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-        HiddenTransform.SetRotation(FQuat::Identity);
-
-        for (int32 i = NeededCount; i < CurrentCount; i++) {
-            BatchTransforms[i] = HiddenTransform;
-        }
-
-        if (CurrentCount > 0) {
-            HISM->BatchUpdateInstancesTransforms(0, BatchTransforms, true, true);
-        }
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            if (Colors.IsValidIndex(i)) {
-                HISM->SetCustomDataValue(i, 0, Colors[i].R, false);
-                HISM->SetCustomDataValue(i, 1, Colors[i].G, false);
-                HISM->SetCustomDataValue(i, 2, Colors[i].B, false);
-            }
-        }
-
-        HISM->MarkRenderStateDirty();
-        };
-
-    if (WorldManager->bFaunaVisualDirty && FaunaHISM && WorldManager->FaunaModule) {
-        TArray<FTransform> Transforms;
-        TArray<FLinearColor> Colors;
-
-        for (const FAnimalData& Animal : WorldManager->FaunaModule->Animals) {
-            if (Animal.HerdSize <= 0.0f) continue;
-            FCellStaticData SCell; FCellDynamicData DCell;
-            int32 GX = FMath::FloorToInt(Animal.Position.X / 50.0f);
-            int32 GY = FMath::FloorToInt(Animal.Position.Y / 50.0f);
-
-            if (WorldManager->GetCellGlobal(GX, GY, SCell, DCell)) {
-                float Scale = (Animal.Type == EAnimalType::Predator) ? 1.5f : 1.0f + (Animal.HerdSize * 0.02f);
-                FVector Loc(Animal.Position.X, Animal.Position.Y, SCell.Elevation + DCell.GlacierIce + 25.0f);
-                FQuat Rot = FRotationMatrix::MakeFromX(FVector(Animal.TargetDirection.X, Animal.TargetDirection.Y, 0.0f)).ToQuat();
-                Transforms.Add(FTransform(Rot, Loc, FVector(Scale)));
-
-                if (Animal.Type == EAnimalType::Predator) Colors.Add(FLinearColor(0.8f, 0.1f, 0.1f));
-                else if (Animal.Type == EAnimalType::ForestAnimal) Colors.Add(FLinearColor(0.1f, 0.3f, 0.1f));
-                else Colors.Add(FLinearColor(0.8f, 0.7f, 0.2f));
-            }
-        }
-        SyncHISM(FaunaHISM, Transforms, Colors);
-        WorldManager->bFaunaVisualDirty = false;
-    }
-
-    if (WorldManager->bHumanVisualDirty && HumanHISM && WorldManager->HumanModule) {
-        TArray<FTransform> Transforms;
-        TArray<FLinearColor> Colors;
-
-        for (const FTribeData& Tribe : WorldManager->HumanModule->Tribes) {
-            if (Tribe.Population <= 0) continue;
-            FCellStaticData SCell; FCellDynamicData DCell;
-            int32 GX = FMath::FloorToInt(Tribe.Position.X / 50.0f);
-            int32 GY = FMath::FloorToInt(Tribe.Position.Y / 50.0f);
-
-            if (WorldManager->GetCellGlobal(GX, GY, SCell, DCell)) {
-                float Scale = 1.0f + (Tribe.Population * 0.01f);
-                FVector Loc(Tribe.Position.X, Tribe.Position.Y, SCell.Elevation + DCell.GlacierIce + 30.0f);
-                FVector2D Dir = (Tribe.TargetRegion - Tribe.Position).GetSafeNormal();
-                if (Dir.IsNearlyZero()) Dir = FVector2D(1, 0);
-                FQuat Rot = FRotationMatrix::MakeFromX(FVector(Dir.X, Dir.Y, 0.0f)).ToQuat();
-                Transforms.Add(FTransform(Rot, Loc, FVector(Scale)));
-                Colors.Add(Tribe.TribeColor);
-            }
-        }
-        SyncHISM(HumanHISM, Transforms, Colors);
-        WorldManager->bHumanVisualDirty = false;
-    }
-}
-
-void UWorldRenderer::UpdateSettlementEntities()
-{
-    if (!WorldManager || !SettlementHISM || !WorldManager->SettlementModule) return;
-
-    TArray<FTransform> Transforms;
-    TArray<FLinearColor> Colors;
-
-    for (const FSettlementData& City : WorldManager->SettlementModule->Settlements) {
-        if (City.Population <= 0) continue;
-
-        FRandomStream BldStream(FMath::RoundToInt(City.Position.X) * 73 + FMath::RoundToInt(City.Position.Y) * 37);
-
-        int32 PopPerHouse = 50;
-        int32 MaxHouses = FMath::Clamp(FMath::FloorToInt((float)City.Population / PopPerHouse), 1, 150);
-
-        TArray<FVector2D> BuiltHouses;
-        BuiltHouses.Reserve(MaxHouses);
-
-        float HouseRadius = 10.0f;
-        float MaxDist = FMath::Max(20.0f, FMath::Sqrt((float)MaxHouses) * 18.0f);
-
-        for (int h = 0; h < MaxHouses; h++) {
-            for (int attempt = 0; attempt < 25; attempt++) {
-                float Angle = BldStream.FRandRange(0.0f, PI * 2.0f);
-                float Dist = BldStream.FRandRange(0.0f, 1.0f) * BldStream.FRandRange(0.0f, 1.0f) * MaxDist;
-                FVector2D HPos = City.Position + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
-
-                bool bOverlap = false;
-                for (const FVector2D& Built : BuiltHouses) {
-                    if (FVector2D::DistSquared(HPos, Built) < HouseRadius * HouseRadius) {
-                        bOverlap = true; break;
-                    }
-                }
-                if (bOverlap) continue;
-
-                int32 GlobalX = FMath::FloorToInt(HPos.X / 50.0f);
-                int32 GlobalY = FMath::FloorToInt(HPos.Y / 50.0f);
-
-                FCellStaticData SCell; FCellDynamicData DCell;
-                if (!WorldManager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) continue;
-                if (DCell.SurfaceWater >= 1.0f || SCell.Elevation <= WorldManager->SeaLevel || SCell.Elevation > WorldManager->SeaLevel + 800.0f) continue;
-                if (DCell.GlacierIce > 0.5f) continue;
-
-                BuiltHouses.Add(HPos);
-
-                FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
-                float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
-                FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
-
-                float RandomScale = BldStream.FRandRange(0.15f, 0.25f);
-
-                Transforms.Add(FTransform(Rot, Loc, FVector(RandomScale)));
-                Colors.Add(City.Color);
-                break;
-            }
-        }
-
-        for (FIntPoint Coord : City.ClaimedCells) {
-            FCellStaticData SCell; FCellDynamicData DCell;
-            if (WorldManager->GetCellGlobal(Coord.X, Coord.Y, SCell, DCell)) {
-                if (SCell.Elevation <= WorldManager->SeaLevel || DCell.SurfaceWater >= 1.0f) continue;
-
-                FVector Loc(Coord.X * 50.0f + 25.0f, Coord.Y * 50.0f + 25.0f, SCell.Elevation);
-                float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
-                FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
-
-                if (SCell.BuildingType == EBuildingType::Mine) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
-                    Colors.Add(FLinearColor(0.2f, 0.2f, 0.2f, 1.0f));
-                }
-                else if (SCell.BuildingType == EBuildingType::LumberCamp) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.35f)));
-                    Colors.Add(FLinearColor(0.35f, 0.20f, 0.10f, 1.0f));
-                }
-                else if (SCell.BuildingType == EBuildingType::Blacksmith) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.4f)));
-                    Colors.Add(FLinearColor(0.3f, 0.05f, 0.05f, 1.0f));
-                }
-                else if (SCell.BuildingType == EBuildingType::Market) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
-                    Colors.Add(FLinearColor(0.9f, 0.7f, 0.1f, 1.0f));
-                }
-            }
-        }
-    }
-
-    auto SyncHISM = [](UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors) {
-        if (!HISM) return;
-        int32 NeededCount = Transforms.Num();
-        int32 CurrentCount = HISM->GetInstanceCount();
-
-        if (NeededCount > CurrentCount) {
-            TArray<FTransform> MissingTransforms;
-            MissingTransforms.SetNumUninitialized(NeededCount - CurrentCount);
-
-            FTransform SafeT;
-            SafeT.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-            SafeT.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            SafeT.SetRotation(FQuat::Identity);
-
-            for (int32 i = 0; i < MissingTransforms.Num(); i++) {
-                MissingTransforms[i] = SafeT;
-            }
-            HISM->AddInstances(MissingTransforms, false);
-            CurrentCount = NeededCount;
-        }
-
-        TArray<FTransform> BatchTransforms;
-        BatchTransforms.SetNumUninitialized(CurrentCount);
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            FTransform T = Transforms[i];
-
-            if (T.GetScale3D().IsNearlyZero()) {
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            }
-            if (T.ContainsNaN()) {
-                T.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-                T.SetRotation(FQuat::Identity);
-            }
-            BatchTransforms[i] = T;
-        }
-
-        FTransform HiddenTransform;
-        HiddenTransform.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-        HiddenTransform.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-        HiddenTransform.SetRotation(FQuat::Identity);
-
-        for (int32 i = NeededCount; i < CurrentCount; i++) {
-            BatchTransforms[i] = HiddenTransform;
-        }
-
-        if (CurrentCount > 0) {
-            HISM->BatchUpdateInstancesTransforms(0, BatchTransforms, true, true);
-        }
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            if (Colors.IsValidIndex(i)) {
-                HISM->SetCustomDataValue(i, 0, Colors[i].R, false);
-                HISM->SetCustomDataValue(i, 1, Colors[i].G, false);
-                HISM->SetCustomDataValue(i, 2, Colors[i].B, false);
-            }
-        }
-
-        HISM->MarkRenderStateDirty();
-        };
-
-    SyncHISM(SettlementHISM, Transforms, Colors);
-    WorldManager->bSettlementVisualDirty = false;
-}
-
-void UWorldRenderer::UpdateTransportEntities()
-{
-    if (!WorldManager || !WorldManager->TransportModule) return;
-
-    TArray<FTransform> CaravanTransforms; TArray<FLinearColor> CaravanColors;
-    TArray<FTransform> ShipTransforms;    TArray<FLinearColor> ShipColors;
-    TArray<FTransform> AirTransforms;     TArray<FLinearColor> AirColors;
-
-    for (const FVehicleData& V : WorldManager->TransportModule->ActiveVehicles) {
-        float Z = WorldManager->SeaLevel;
-        FVector2D Dir = FVector2D(1, 0);
-        if (V.Path.Num() > 1 && V.CurrentPathNode + 1 < V.Path.Num()) {
-            Dir = (V.Path[V.CurrentPathNode + 1] - V.Position).GetSafeNormal();
-            if (Dir.IsNearlyZero()) Dir = FVector2D(1, 0);
-        }
-        FQuat Rot = FRotationMatrix::MakeFromX(FVector(Dir.X, Dir.Y, 0.0f)).ToQuat();
-
-        if (V.Type == EVehicleType::Caravan) {
-            FCellStaticData SCell; FCellDynamicData DCell;
-            int32 GX = FMath::FloorToInt(V.Position.X / 50.0f);
-            int32 GY = FMath::FloorToInt(V.Position.Y / 50.0f);
-            if (WorldManager->GetCellGlobal(GX, GY, SCell, DCell)) {
-                Z = SCell.Elevation + DCell.GlacierIce;
-            }
-            CaravanTransforms.Add(FTransform(Rot, FVector(V.Position.X, V.Position.Y, Z + 10.0f), FVector(0.5f)));
-            CaravanColors.Add(FLinearColor(0.6f, 0.4f, 0.2f, 1.0f));
-        }
-        else if (V.Type == EVehicleType::Ship) {
-            ShipTransforms.Add(FTransform(Rot, FVector(V.Position.X, V.Position.Y, Z + 5.0f), FVector(1.0f)));
-            ShipColors.Add(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f));
-        }
-        else if (V.Type == EVehicleType::Airplane) {
-            Z = WorldManager->SeaLevel + 1500.0f;
-            AirTransforms.Add(FTransform(Rot, FVector(V.Position.X, V.Position.Y, Z), FVector(2.0f)));
-            AirColors.Add(FLinearColor(0.9f, 0.9f, 0.9f, 1.0f));
-        }
-    }
-
-    auto SyncHISM = [](UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors) {
-        if (!HISM) return;
-        int32 NeededCount = Transforms.Num();
-        int32 CurrentCount = HISM->GetInstanceCount();
-
-        if (NeededCount > CurrentCount) {
-            TArray<FTransform> MissingTransforms;
-            MissingTransforms.SetNumUninitialized(NeededCount - CurrentCount);
-
-            FTransform SafeT;
-            SafeT.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-            SafeT.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            SafeT.SetRotation(FQuat::Identity);
-
-            for (int32 i = 0; i < MissingTransforms.Num(); i++) {
-                MissingTransforms[i] = SafeT;
-            }
-            HISM->AddInstances(MissingTransforms, false);
-            CurrentCount = NeededCount;
-        }
-
-        TArray<FTransform> BatchTransforms;
-        BatchTransforms.SetNumUninitialized(CurrentCount);
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            FTransform T = Transforms[i];
-
-            if (T.GetScale3D().IsNearlyZero()) {
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-            }
-            if (T.ContainsNaN()) {
-                T.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-                T.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-                T.SetRotation(FQuat::Identity);
-            }
-            BatchTransforms[i] = T;
-        }
-
-        FTransform HiddenTransform;
-        HiddenTransform.SetLocation(FVector(0.0f, 0.0f, -50000.0f));
-        HiddenTransform.SetScale3D(FVector(0.01f, 0.01f, 0.01f));
-        HiddenTransform.SetRotation(FQuat::Identity);
-
-        for (int32 i = NeededCount; i < CurrentCount; i++) {
-            BatchTransforms[i] = HiddenTransform;
-        }
-
-        if (CurrentCount > 0) {
-            HISM->BatchUpdateInstancesTransforms(0, BatchTransforms, true, true);
-        }
-
-        for (int32 i = 0; i < NeededCount; i++) {
-            if (Colors.IsValidIndex(i)) {
-                HISM->SetCustomDataValue(i, 0, Colors[i].R, false);
-                HISM->SetCustomDataValue(i, 1, Colors[i].G, false);
-                HISM->SetCustomDataValue(i, 2, Colors[i].B, false);
-            }
-        }
-
-        HISM->MarkRenderStateDirty();
-        };
-
-    if (CaravanHISM) SyncHISM(CaravanHISM, CaravanTransforms, CaravanColors);
-    if (ShipHISM) SyncHISM(ShipHISM, ShipTransforms, ShipColors);
-    if (AirplaneHISM) SyncHISM(AirplaneHISM, AirTransforms, AirColors);
 }

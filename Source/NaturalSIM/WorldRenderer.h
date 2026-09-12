@@ -54,4 +54,7 @@ public:
 
 private:
     ASimWorldManager* WorldManager;
+
+    // OPTIMALIZACE 7: Centrální bezpeèný synchronizátor HISM
+    void SyncHISM(UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors);
 };

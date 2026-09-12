@@ -8,65 +8,38 @@
 UHydroSystem::UHydroSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UHydroSystem::BeginPlay() { Super::BeginPlay(); }
 
-// OPTIMALIZACE 4: FHaloBuffer pøepsán pro práci se Static a Dynamic daty
-struct FHaloBuffer {
-    TArray<FCellStaticData> TopEdgeS, BotEdgeS, LftEdgeS, RgtEdgeS;
-    TArray<FCellDynamicData> TopEdgeD, BotEdgeD, LftEdgeD, RgtEdgeD;
-    TArray<bool> HasT, HasB, HasL, HasR;
-    FCellStaticData TLS, TRS, BLS, BRS;
-    FCellDynamicData TLD, TRD, BLD, BRD;
-    bool HasTL = false, HasTR = false, HasBL = false, HasBR = false;
-    int32 CSize = 0, CS = 0, BaseGX = 0, BaseGY = 0;
+struct FChunkNeighborhood {
+    const FChunkData* Chunks[3][3];
+    int32 CS;
 
-    void Fetch(ASimWorldManager* Manager, FIntPoint Coord, int32 InCSize, int32 InCS) {
-        CSize = InCSize; CS = InCS;
-        BaseGX = Coord.X * CSize; BaseGY = Coord.Y * CSize;
-        TopEdgeS.SetNumUninitialized(CSize); BotEdgeS.SetNumUninitialized(CSize);
-        LftEdgeS.SetNumUninitialized(CSize); RgtEdgeS.SetNumUninitialized(CSize);
-        TopEdgeD.SetNumUninitialized(CSize); BotEdgeD.SetNumUninitialized(CSize);
-        LftEdgeD.SetNumUninitialized(CSize); RgtEdgeD.SetNumUninitialized(CSize);
-        HasT.Init(false, CSize); HasB.Init(false, CSize); HasL.Init(false, CSize); HasR.Init(false, CSize);
-
-        for (int x = 0; x < CSize; x++) {
-            HasT[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY - 1, TopEdgeS[x], TopEdgeD[x]);
-            HasB[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY + CSize, BotEdgeS[x], BotEdgeD[x]);
+    void Initialize(ASimWorldManager* Manager, FIntPoint CenterCoord, int32 InCS) {
+        CS = InCS;
+        for (int32 cy = -1; cy <= 1; cy++) {
+            for (int32 cx = -1; cx <= 1; cx++) {
+                Chunks[cy + 1][cx + 1] = Manager->WorldChunks.Find(FIntPoint(CenterCoord.X + cx, CenterCoord.Y + cy));
+            }
         }
-        for (int y = 0; y < CSize; y++) {
-            HasL[y] = Manager->GetCellGlobal(BaseGX - 1, BaseGY + y, LftEdgeS[y], LftEdgeD[y]);
-            HasR[y] = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + y, RgtEdgeS[y], RgtEdgeD[y]);
-        }
-        HasTL = Manager->GetCellGlobal(BaseGX - 1, BaseGY - 1, TLS, TLD);
-        HasTR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY - 1, TRS, TRD);
-        HasBL = Manager->GetCellGlobal(BaseGX - 1, BaseGY + CSize, BLS, BLD);
-        HasBR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + CSize, BRS, BRD);
     }
 
-    void GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-        OutS = nullptr; OutD = nullptr;
-        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
-            int32 Idx = lx + ly * CS;
-            OutS = &Chunk.StaticCells[Idx];
-            OutD = &Chunk.DynamicCells[Idx];
-            return;
+    FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
+        int32 GridX = 1; int32 GridY = 1;
+        int32 LocalX = lx; int32 LocalY = ly;
+
+        if (lx < 0) { GridX = 0; LocalX = lx + CS; }
+        else if (lx >= CS) { GridX = 2; LocalX = lx - CS; }
+
+        if (ly < 0) { GridY = 0; LocalY = ly + CS; }
+        else if (ly >= CS) { GridY = 2; LocalY = ly - CS; }
+
+        if (const FChunkData* TargetChunk = Chunks[GridY][GridX]) {
+            int32 Idx = LocalX + LocalY * CS;
+            OutS = &TargetChunk->StaticCells[Idx];
+            OutD = &TargetChunk->DynamicCells[Idx];
         }
-        if (lx >= -1 && lx <= CSize && ly >= -1 && ly <= CSize) {
-            if (ly < 0) {
-                if (lx < 0) { if (HasTL) { OutS = &TLS; OutD = &TLD; } return; }
-                if (lx == CSize) { if (HasTR) { OutS = &TRS; OutD = &TRD; } return; }
-                if (HasT[lx]) { OutS = &TopEdgeS[lx]; OutD = &TopEdgeD[lx]; } return;
-            }
-            if (ly == CSize) {
-                if (lx < 0) { if (HasBL) { OutS = &BLS; OutD = &BLD; } return; }
-                if (lx == CSize) { if (HasBR) { OutS = &BRS; OutD = &BRD; } return; }
-                if (HasB[lx]) { OutS = &BotEdgeS[lx]; OutD = &BotEdgeD[lx]; } return;
-            }
-            if (lx < 0) { if (HasL[ly]) { OutS = &LftEdgeS[ly]; OutD = &LftEdgeD[ly]; } return; }
-            if (lx == CSize) { if (HasR[ly]) { OutS = &RgtEdgeS[ly]; OutD = &RgtEdgeD[ly]; } return; }
+        else {
+            OutS = nullptr;
+            OutD = nullptr;
         }
-        FIntPoint DummyCoord;
-        FCellStaticData* S = nullptr; FCellDynamicData* D = nullptr;
-        Manager->GetMutableCellGlobal(BaseGX + lx, BaseGY + ly, S, D, DummyCoord);
-        OutS = S; OutD = D;
     }
 };
 
@@ -385,16 +358,19 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         TidalMultiplier = Manager->CosmosModule->CurrentState.GlobalTidalMultiplier;
     }
 
-    int32 GlobalStart = 0;
-    int32 GlobalEnd = ChunkKeys.Num();
-
-    ParallelFor(GlobalEnd, [&](int32 idx) {
+    // ----------------------------------------------------
+    // FÁZE 1: FLOW DIRECTION (Smìrování vody)
+    // OPRAVA CHYBY: ParallelFor musí jet POUZE od 0 do (EndIdx - StartIdx), nikoliv pøes všechny chunky!
+    // ----------------------------------------------------
+    ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
+        int32 idx = StartIdx + iter;
+        if (!ChunkKeys.IsValidIndex(idx)) return;
         FIntPoint Coord = ChunkKeys[idx];
         if (!WorldChunks.Contains(Coord)) return;
         FChunkData& Chunk = WorldChunks[Coord];
 
-        FHaloBuffer Halo;
-        Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
+        FChunkNeighborhood Halo;
+        Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
@@ -403,10 +379,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                 FCellDynamicData& DCell = Chunk.DynamicCells[i];
                 int32 GlobalX = (Coord.X * CSize) + X;
                 int32 GlobalY = (Coord.Y * CSize) + Y;
-
-                auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-                    Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
-                    };
 
                 if (SCell.Elevation <= Manager->SeaLevel) {
                     SCell.WaterType = EWaterType::Ocean;
@@ -418,7 +390,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
                     for (int32 n = 0; n < 8; n++) {
                         const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                        GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+                        Halo.GetNeighbor(X + Offsets[n][0], Y + Offsets[n][1], NCellS, NCellD);
                         if (NCellS && NCellS->Elevation < LowestHead) {
                             LowestHead = NCellS->Elevation;
                             LowestGlobalX = GlobalX + Offsets[n][0];
@@ -472,7 +444,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
                     for (int32 n = 0; n < 8; n++) {
                         const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                        GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+                        Halo.GetNeighbor(X + Offsets[n][0], Y + Offsets[n][1], NCellS, NCellD);
                         if (NCellS && NCellD) {
                             float nHead = NCellS->Elevation + NCellD->SurfaceWater;
                             if (nHead < LowestHead) {
@@ -496,13 +468,18 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
     const float FlowCoefficient = 0.18f;
 
-    ParallelFor(GlobalEnd, [&](int32 idx) {
+    // ----------------------------------------------------
+    // FÁZE 2: WATER TRANSFER (Pøenos vody a síly proudu)
+    // ----------------------------------------------------
+    ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
+        int32 idx = StartIdx + iter;
+        if (!ChunkKeys.IsValidIndex(idx)) return;
         FIntPoint Coord = ChunkKeys[idx];
         if (!WorldChunks.Contains(Coord)) return;
         FChunkData& Chunk = WorldChunks[Coord];
 
-        FHaloBuffer Halo;
-        Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
+        FChunkNeighborhood Halo;
+        Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
         float LocalFlowCoefficient = Chunk.bGeomorphologyDirty ? 0.8f : FlowCoefficient;
 
@@ -516,10 +493,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
                 int32 GlobalX = (Coord.X * CSize) + X;
                 int32 GlobalY = (Coord.Y * CSize) + Y;
-
-                auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-                    Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
-                    };
 
                 float SpringInput = 0.0f;
                 if (SCell.bIsSpring) {
@@ -535,7 +508,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                     int32 FlowDY = SCell.FlowDirectionGlobalY - GlobalY;
 
                     const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
-                    GetNeighbor(FlowDX, FlowDY, TargetCellS, TargetCellD);
+                    Halo.GetNeighbor(X + FlowDX, Y + FlowDY, TargetCellS, TargetCellD);
 
                     if (TargetCellS && TargetCellD) {
                         float Diff = (SCell.Elevation + DCell.SurfaceWater) - (TargetCellS->Elevation + TargetCellD->SurfaceWater);
@@ -553,7 +526,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                 float MyInflow = 0.0f;
                 for (int32 n = 0; n < 8; n++) {
                     const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                    GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+                    Halo.GetNeighbor(X + Offsets[n][0], Y + Offsets[n][1], NCellS, NCellD);
 
                     if (NCellS && NCellD) {
                         if (NCellS->WaterType != EWaterType::Ocean && NCellS->FlowDirectionGlobalX == GlobalX && NCellS->FlowDirectionGlobalY == GlobalY) {
@@ -593,7 +566,9 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         }
         });
 
-    ParallelFor(GlobalEnd, [&](int32 idx) {
+    ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
+        int32 idx = StartIdx + iter;
+        if (!ChunkKeys.IsValidIndex(idx)) return;
         FIntPoint Coord = ChunkKeys[idx];
         if (!WorldChunks.Contains(Coord)) return;
         FChunkData& Chunk = WorldChunks[Coord];
@@ -619,15 +594,20 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         const float DepositionRate = 0.08f;
 
         TArray<uint8> SafeFlags;
-        SafeFlags.Init(0, GlobalEnd);
+        SafeFlags.Init(0, EndIdx - StartIdx);
 
-        ParallelFor(GlobalEnd, [&](int32 idx) {
+        // ----------------------------------------------------
+        // FÁZE 4: GEOMORPHOLOGY (Vodní eroze a naplaveniny)
+        // ----------------------------------------------------
+        ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
+            int32 idx = StartIdx + iter;
+            if (!ChunkKeys.IsValidIndex(idx)) return;
             FIntPoint Coord = ChunkKeys[idx];
             if (!WorldChunks.Contains(Coord)) return;
             FChunkData& Chunk = WorldChunks[Coord];
 
-            FHaloBuffer Halo;
-            Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
+            FChunkNeighborhood Halo;
+            Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
@@ -636,10 +616,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                     FCellDynamicData& DCell = Chunk.DynamicCells[i];
 
                     int32 GlobalX = (Coord.X * CSize) + X; int32 GlobalY = (Coord.Y * CSize) + Y;
-
-                    auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-                        Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
-                        };
 
                     if (SCell.WaterType == EWaterType::Ocean || SCell.Elevation <= Manager->SeaLevel) {
                         if (DCell.Sediment > 0.01f) {
@@ -659,7 +635,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                                 SCell.WaterType = EWaterType::Surface;
                                 SCell.Bedrock = EBedrockType::Sand;
                                 SCell.SoilType = ESoilType::Sand;
-                                SafeFlags[idx] |= EChunkVisualDirty::Flora | EChunkVisualDirty::Terrain;
+                                SafeFlags[iter] |= EChunkVisualDirty::Flora | EChunkVisualDirty::Terrain;
                             }
                         }
 
@@ -681,7 +657,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                         for (int32 n = 0; n < 8; n++) {
                             int32 NX = GlobalX + Offsets[n][0]; int32 NY = GlobalY + Offsets[n][1];
                             const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                            GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+                            Halo.GetNeighbor(X + Offsets[n][0], Y + Offsets[n][1], NCellS, NCellD);
 
                             if (NCellS && NCellD && NCellD->RiverDischarge > 1.0f && NCellD->SurfaceWater > 0.1f) {
                                 FVector2D DirToMe(-Offsets[n][0], -Offsets[n][1]); DirToMe.Normalize();
@@ -695,7 +671,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                                     for (int32 nn = 0; nn < 8; nn++) {
                                         int32 relDX = Offsets[n][0] + Offsets[nn][0]; int32 relDY = Offsets[n][1] + Offsets[nn][1];
                                         const FCellStaticData* UpstreamS = nullptr; const FCellDynamicData* UpstreamD = nullptr;
-                                        GetNeighbor(relDX, relDY, UpstreamS, UpstreamD);
+                                        Halo.GetNeighbor(X + relDX, Y + relDY, UpstreamS, UpstreamD);
 
                                         if (UpstreamS && UpstreamD && UpstreamS->FlowDirectionGlobalX == NX && UpstreamS->FlowDirectionGlobalY == NY) {
                                             NInflowMom += FVector2D(-Offsets[nn][0], -Offsets[nn][1]) * UpstreamD->WaterFlow;
@@ -742,7 +718,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                         int32 FlowDY = SCell.FlowDirectionGlobalY - GlobalY;
 
                         const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
-                        GetNeighbor(FlowDX, FlowDY, TargetCellS, TargetCellD);
+                        Halo.GetNeighbor(X + FlowDX, Y + FlowDY, TargetCellS, TargetCellD);
 
                         if (TargetCellS && TargetCellD) {
                             Slope = FMath::Max(0.0f, (SCell.Elevation + DCell.SurfaceWater) - (TargetCellS->Elevation + TargetCellD->SurfaceWater));
@@ -800,7 +776,9 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             }
             });
 
-        ParallelFor(GlobalEnd, [&](int32 idx) {
+        ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
+            int32 idx = StartIdx + iter;
+            if (!ChunkKeys.IsValidIndex(idx)) return;
             FIntPoint Coord = ChunkKeys[idx];
             if (!WorldChunks.Contains(Coord)) return;
             FChunkData& Chunk = WorldChunks[Coord];
@@ -816,13 +794,18 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             }
             });
 
-        ParallelFor(GlobalEnd, [&](int32 idx) {
+        // ----------------------------------------------------
+        // FÁZE 6: SEDIMENT INFLOW (Sbìr naplavenin)
+        // ----------------------------------------------------
+        ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
+            int32 idx = StartIdx + iter;
+            if (!ChunkKeys.IsValidIndex(idx)) return;
             FIntPoint Coord = ChunkKeys[idx];
             if (!WorldChunks.Contains(Coord)) return;
             FChunkData& Chunk = WorldChunks[Coord];
 
-            FHaloBuffer Halo;
-            Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
+            FChunkNeighborhood Halo;
+            Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
@@ -832,14 +815,10 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
                     int32 GlobalX = (Coord.X * CSize) + X; int32 GlobalY = (Coord.Y * CSize) + Y;
 
-                    auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-                        Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
-                        };
-
                     float SedimentInflow = 0.0f;
                     for (int32 n = 0; n < 8; n++) {
                         const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                        GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+                        Halo.GetNeighbor(X + Offsets[n][0], Y + Offsets[n][1], NCellS, NCellD);
 
                         if (NCellS && NCellD && NCellS->FlowDirectionGlobalX == GlobalX && NCellS->FlowDirectionGlobalY == GlobalY) {
                             float N_ElevAboveSea = FMath::Max(0.0f, NCellS->Elevation - Manager->SeaLevel);
@@ -900,8 +879,8 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                 Chunk.DynamicCells[CSize + CSize * Manager->ChunkSize] = *RealCornerD;
             }
 
-            if (SafeFlags[idx] != 0) {
-                Manager->RegisterVisualChange(ChunkKeys[idx], SafeFlags[idx]);
+            if (SafeFlags[iter] != 0) {
+                Manager->RegisterVisualChange(ChunkKeys[idx], SafeFlags[iter]);
             }
             });
     }

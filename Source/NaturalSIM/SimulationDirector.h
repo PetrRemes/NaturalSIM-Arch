@@ -53,7 +53,9 @@ public:
     UPROPERTY(EditAnywhere, Category = "Performance") float MaxSimulationBudgetMs = 8.0f;
     UPROPERTY(EditAnywhere, Category = "Performance") float TargetTaskBudgetMs = 1.0f;
 
+    UFUNCTION(BlueprintPure, Category = "Telemetry")
     FString GetTelemetryString() const;
+
 
 private:
     ASimWorldManager* Manager;

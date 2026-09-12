@@ -10,65 +10,39 @@
 UTectonicSystem::UTectonicSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UTectonicSystem::BeginPlay() { Super::BeginPlay(); }
 
-// OPTIMALIZACE 4: FHaloBuffer aktualizován pro 2 nezávislá SOA pole
-struct FHaloBuffer {
-    TArray<FCellStaticData> TopEdgeS, BotEdgeS, LftEdgeS, RgtEdgeS;
-    TArray<FCellDynamicData> TopEdgeD, BotEdgeD, LftEdgeD, RgtEdgeD;
-    TArray<bool> HasT, HasB, HasL, HasR;
-    FCellStaticData TLS, TRS, BLS, BRS;
-    FCellDynamicData TLD, TRD, BLD, BRD;
-    bool HasTL = false, HasTR = false, HasBL = false, HasBR = false;
-    int32 CSize = 0, CS = 0, BaseGX = 0, BaseGY = 0;
+// OPTIMALIZACE 6: Zero-Allocation Neighborhood (Zabránìní zahlcení pamìti v Tectonics)
+struct FChunkNeighborhood {
+    const FChunkData* Chunks[3][3];
+    int32 CS;
 
-    void Fetch(ASimWorldManager* Manager, FIntPoint Coord, int32 InCSize, int32 InCS) {
-        CSize = InCSize; CS = InCS;
-        BaseGX = Coord.X * CSize; BaseGY = Coord.Y * CSize;
-        TopEdgeS.SetNumUninitialized(CSize); BotEdgeS.SetNumUninitialized(CSize);
-        LftEdgeS.SetNumUninitialized(CSize); RgtEdgeS.SetNumUninitialized(CSize);
-        TopEdgeD.SetNumUninitialized(CSize); BotEdgeD.SetNumUninitialized(CSize);
-        LftEdgeD.SetNumUninitialized(CSize); RgtEdgeD.SetNumUninitialized(CSize);
-        HasT.Init(false, CSize); HasB.Init(false, CSize); HasL.Init(false, CSize); HasR.Init(false, CSize);
-
-        for (int x = 0; x < CSize; x++) {
-            HasT[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY - 1, TopEdgeS[x], TopEdgeD[x]);
-            HasB[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY + CSize, BotEdgeS[x], BotEdgeD[x]);
+    void Initialize(ASimWorldManager* Manager, FIntPoint CenterCoord, int32 InCS) {
+        CS = InCS;
+        for (int32 cy = -1; cy <= 1; cy++) {
+            for (int32 cx = -1; cx <= 1; cx++) {
+                Chunks[cy + 1][cx + 1] = Manager->WorldChunks.Find(FIntPoint(CenterCoord.X + cx, CenterCoord.Y + cy));
+            }
         }
-        for (int y = 0; y < CSize; y++) {
-            HasL[y] = Manager->GetCellGlobal(BaseGX - 1, BaseGY + y, LftEdgeS[y], LftEdgeD[y]);
-            HasR[y] = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + y, RgtEdgeS[y], RgtEdgeD[y]);
-        }
-        HasTL = Manager->GetCellGlobal(BaseGX - 1, BaseGY - 1, TLS, TLD);
-        HasTR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY - 1, TRS, TRD);
-        HasBL = Manager->GetCellGlobal(BaseGX - 1, BaseGY + CSize, BLS, BLD);
-        HasBR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + CSize, BRS, BRD);
     }
 
-    void GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-        OutS = nullptr; OutD = nullptr;
-        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
-            int32 Idx = lx + ly * CS;
-            OutS = &Chunk.StaticCells[Idx];
-            OutD = &Chunk.DynamicCells[Idx];
-            return;
+    FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
+        int32 GridX = 1; int32 GridY = 1;
+        int32 LocalX = lx; int32 LocalY = ly;
+
+        if (lx < 0) { GridX = 0; LocalX = lx + CS; }
+        else if (lx >= CS) { GridX = 2; LocalX = lx - CS; }
+
+        if (ly < 0) { GridY = 0; LocalY = ly + CS; }
+        else if (ly >= CS) { GridY = 2; LocalY = ly - CS; }
+
+        if (const FChunkData* TargetChunk = Chunks[GridY][GridX]) {
+            int32 Idx = LocalX + LocalY * CS;
+            OutS = &TargetChunk->StaticCells[Idx];
+            OutD = &TargetChunk->DynamicCells[Idx];
         }
-        if (lx >= -1 && lx <= CSize && ly >= -1 && ly <= CSize) {
-            if (ly < 0) {
-                if (lx < 0) { if (HasTL) { OutS = &TLS; OutD = &TLD; } return; }
-                if (lx == CSize) { if (HasTR) { OutS = &TRS; OutD = &TRD; } return; }
-                if (HasT[lx]) { OutS = &TopEdgeS[lx]; OutD = &TopEdgeD[lx]; } return;
-            }
-            if (ly == CSize) {
-                if (lx < 0) { if (HasBL) { OutS = &BLS; OutD = &BLD; } return; }
-                if (lx == CSize) { if (HasBR) { OutS = &BRS; OutD = &BRD; } return; }
-                if (HasB[lx]) { OutS = &BotEdgeS[lx]; OutD = &BotEdgeD[lx]; } return;
-            }
-            if (lx < 0) { if (HasL[ly]) { OutS = &LftEdgeS[ly]; OutD = &LftEdgeD[ly]; } return; }
-            if (lx == CSize) { if (HasR[ly]) { OutS = &RgtEdgeS[ly]; OutD = &RgtEdgeD[ly]; } return; }
+        else {
+            OutS = nullptr;
+            OutD = nullptr;
         }
-        FIntPoint DummyCoord;
-        FCellStaticData* S = nullptr; FCellDynamicData* D = nullptr;
-        Manager->GetMutableCellGlobal(BaseGX + lx, BaseGY + ly, S, D, DummyCoord);
-        OutS = S; OutD = D;
     }
 };
 
@@ -120,12 +94,12 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             Chunk.FaultStress *= FMath::FRandRange(0.1f, 0.2f);
         }
 
-        FHaloBuffer Halo;
-        Halo.Fetch(Manager, ChunkKeys[idx], CSize, Manager->ChunkSize);
+        FChunkNeighborhood Halo;
+        Halo.Initialize(Manager, ChunkKeys[idx], Manager->ChunkSize);
 
         auto GetLowestNeighbor = [&](int32 cx, int32 cy, int32 lx, int32 ly) -> FIntPoint {
             const FCellStaticData* cCellS = nullptr; const FCellDynamicData* cCellD = nullptr;
-            Halo.GetNeighbor(lx, ly, Chunk, Manager, cCellS, cCellD);
+            Halo.GetNeighbor(lx, ly, cCellS, cCellD);
             if (!cCellS || !cCellD) return FIntPoint(cx, cy);
 
             float lowestH = cCellS->Elevation + cCellD->Lava;
@@ -133,7 +107,7 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
 
             for (int i = 0; i < 8; i++) {
                 const FCellStaticData* nCellS = nullptr; const FCellDynamicData* nCellD = nullptr;
-                Halo.GetNeighbor(lx + Offsets[i][0], ly + Offsets[i][1], Chunk, Manager, nCellS, nCellD);
+                Halo.GetNeighbor(lx + Offsets[i][0], ly + Offsets[i][1], nCellS, nCellD);
                 if (nCellS && nCellD) {
                     float h = nCellS->Elevation + nCellD->Lava;
                     if (h < lowestH - 0.05f) {
@@ -194,7 +168,7 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                     int32 flowLy = Y + (TargetFlow.Y - GlobalY);
 
                     const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
-                    Halo.GetNeighbor(flowLx, flowLy, Chunk, Manager, TargetCellS, TargetCellD);
+                    Halo.GetNeighbor(flowLx, flowLy, TargetCellS, TargetCellD);
 
                     if (TargetCellS && TargetCellD) {
                         float TargetHead = TargetCellS->Elevation + TargetCellD->Lava;
@@ -213,7 +187,7 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                     int32 nly = Y + Offsets[n][1];
 
                     const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                    Halo.GetNeighbor(nlx, nly, Chunk, Manager, NCellS, NCellD);
+                    Halo.GetNeighbor(nlx, nly, NCellS, NCellD);
 
                     if (NCellS && NCellD && NCellD->Lava > 0.0f) {
                         FIntPoint NeighborTarget = GetLowestNeighbor(nx, ny, nlx, nly);

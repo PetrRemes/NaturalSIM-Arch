@@ -113,7 +113,13 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "State") EWorldViewMode CurrentViewMode = EWorldViewMode::Normal;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Climate") float GlobalCloudTime = 0.0f;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Climate") FVector2D GlobalCloudDrift = FVector2D::ZeroVector;
+
+public:
+	// Zde jsou všechny veøejné stavy
 	UPROPERTY(BlueprintReadOnly, Category = "State") bool bIsSimulationActive = false;
+	UPROPERTY(BlueprintReadOnly, Category = "State") bool bIsGenerating = false;
+
+	TSharedPtr<TArray<FPrecomputedTerrain>> GlobalTerrainCache;
 
 	TMap<FIntPoint, FChunkData> WorldChunks;
 	UPROPERTY() TArray<FIntPoint> CachedChunkKeys;
@@ -128,11 +134,9 @@ public:
 	TQueue<FChunkRenderTask, EQueueMode::Mpsc> PendingRenderQueue;
 	TSet<FIntPoint> ActiveGeneratingChunks;
 
-	TSharedPtr<TArray<struct FPrecomputedTerrain>> GlobalTerrainCache;
-
-	// OPTIMALIZACE 4: Pøepis Getterù pro návrat Static i Dynamic struktur
+	// Nové SoA hlavièky funkcí
 	bool GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellStaticData*& OutStatic, FCellDynamicData*& OutDynamic, FIntPoint& OutChunkCoord);
-	bool GetCellGlobal(int32 GlobalX, int32 GlobalY, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic);
+	bool GetCellGlobal(int32 GlobalX, int32 GlobalY, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic) const;
 	bool GetCellStaticGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellStaticData*& OutStatic) const;
 	bool GetCellDynamicGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellDynamicData*& OutDynamic) const;
 
@@ -151,10 +155,14 @@ public:
 	void NotifyChunkRendered();
 	FVector GetPlayerLocation() const;
 
-	bool GetTribeAtLocation(FVector WorldLocation, FTribeData& OutTribe, float Radius = 100.0f);
-	bool GetSettlementAtLocation(FVector WorldLocation, FSettlementData& OutSettlement, float Radius = 200.0f);
-	bool GetAnimalAtLocation(FVector WorldLocation, FAnimalData& OutAnimal, float Radius = 100.0f);
-	bool GetCellDataAtLocation(FVector WorldLocation, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic);
+	// Opravené a sjednocené deklarace (pøidán const)
+	bool GetTribeAtLocation(FVector WorldLocation, FTribeData& OutTribe, float Radius = 100.0f) const;
+	bool GetSettlementAtLocation(FVector WorldLocation, FSettlementData& OutSettlement, float Radius = 200.0f) const;
+	bool GetAnimalAtLocation(FVector WorldLocation, FAnimalData& OutAnimal, float Radius = 100.0f) const;
+
+	UFUNCTION(BlueprintCallable, Category = "Simulation")
+	bool GetCellDataAtLocation(FVector WorldLocation, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic) const;
+
 	int32 GetTotalPopulation() const;
 
 protected:
@@ -173,7 +181,6 @@ private:
 
 	TArray<FContinentData> Continents;
 	int32 ActiveChunkTasks = 0;
-	bool bIsGenerating = false;
 	bool bCurrentQueueIsFullGeneration = false;
 	int32 GenerationToken = 0;
 
