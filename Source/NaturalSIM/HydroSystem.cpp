@@ -8,158 +8,69 @@
 UHydroSystem::UHydroSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UHydroSystem::BeginPlay() { Super::BeginPlay(); }
 
+// OPTIMALIZACE 3: Struktura Halo Bufferu (Ghost Cells) pro eliminaci zámkù napøíè chunky
+struct FHaloBuffer {
+    TArray<FCellData> TopEdge, BotEdge, LftEdge, RgtEdge;
+    TArray<bool> HasT, HasB, HasL, HasR;
+    FCellData TL, TR, BL, BR;
+    bool HasTL = false, HasTR = false, HasBL = false, HasBR = false;
+    int32 CSize = 0, CS = 0, BaseGX = 0, BaseGY = 0;
+
+    void Fetch(ASimWorldManager* Manager, FIntPoint Coord, int32 InCSize, int32 InCS) {
+        CSize = InCSize; CS = InCS;
+        BaseGX = Coord.X * CSize; BaseGY = Coord.Y * CSize;
+        TopEdge.SetNumUninitialized(CSize); BotEdge.SetNumUninitialized(CSize);
+        LftEdge.SetNumUninitialized(CSize); RgtEdge.SetNumUninitialized(CSize);
+        HasT.Init(false, CSize); HasB.Init(false, CSize); HasL.Init(false, CSize); HasR.Init(false, CSize);
+
+        for (int x = 0; x < CSize; x++) {
+            const FCellData* c;
+            HasT[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY - 1, c); if (HasT[x]) TopEdge[x] = *c;
+            HasB[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY + CSize, c); if (HasB[x]) BotEdge[x] = *c;
+        }
+        for (int y = 0; y < CSize; y++) {
+            const FCellData* c;
+            HasL[y] = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + y, c); if (HasL[y]) LftEdge[y] = *c;
+            HasR[y] = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + y, c); if (HasR[y]) RgtEdge[y] = *c;
+        }
+        const FCellData* cor;
+        HasTL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY - 1, cor); if (HasTL) TL = *cor;
+        HasTR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY - 1, cor); if (HasTR) TR = *cor;
+        HasBL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + CSize, cor); if (HasBL) BL = *cor;
+        HasBR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + CSize, cor); if (HasBR) BR = *cor;
+    }
+
+    const FCellData* GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager) {
+        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) return &Chunk.MicroCells[lx + ly * CS];
+        if (lx >= -1 && lx <= CSize && ly >= -1 && ly <= CSize) {
+            if (ly < 0) {
+                if (lx < 0) return HasTL ? &TL : nullptr;
+                if (lx == CSize) return HasTR ? &TR : nullptr;
+                return HasT[lx] ? &TopEdge[lx] : nullptr;
+            }
+            if (ly == CSize) {
+                if (lx < 0) return HasBL ? &BL : nullptr;
+                if (lx == CSize) return HasBR ? &BR : nullptr;
+                return HasB[lx] ? &BotEdge[lx] : nullptr;
+            }
+            if (lx < 0) return HasL[ly] ? &LftEdge[ly] : nullptr;
+            if (lx == CSize) return HasR[ly] ? &RgtEdge[ly] : nullptr;
+        }
+        // Záložní vrstva (radius 2) pro výpoèty dynamiky a meandrù
+        const FCellData* Fallback = nullptr;
+        Manager->GetCellGlobalPtr(BaseGX + lx, BaseGY + ly, Fallback);
+        return Fallback;
+    }
+};
+
 static float GetRiverElev(float GlobalX, float GlobalY, const FChunkGenerationParameters& Params)
 {
-    float WorldCellsX = FMath::Max(1.0f, (float)(Params.WorldSizeInChunksX * (Params.ChunkSize - 1)));
-    float WorldCellsY = FMath::Max(1.0f, (float)(Params.WorldSizeInChunksY * (Params.ChunkSize - 1)));
-
-    float WarpFreq = Params.NoiseScale * 0.3f;
-    float WarpAmp = FMath::Max(WorldCellsX, WorldCellsY) * 0.25f;
-    float WarpX = GetFBM(GlobalX, GlobalY, WarpFreq, 3, Params.MapSeed) * WarpAmp;
-    float WarpY = GetFBM(GlobalY, GlobalX, WarpFreq, 3, Params.MapSeed + 50) * WarpAmp;
-    float WarpedX = GlobalX + WarpX;
-    float WarpedY = GlobalY + WarpY;
-
-    float ShiftMultiplier = FMath::Max(WorldCellsX, WorldCellsY) * 0.3f;
-    float Dist1 = 9999999.0f; float Dist2 = 9999999.0f;
-
-    for (int32 i = 0; i < Params.Continents.Num(); i++) {
-        FRandomStream SizeStream(Params.MapSeed + i * 73);
-        float RadiusMult = (Params.ContinentCount <= 2) ? 1.2f : (1.8f / FMath::Sqrt((float)FMath::Max(1, Params.ContinentCount))) * SizeStream.FRandRange(0.6f, 1.6f);
-
-        FVector2D EffCenter = Params.Continents[i].OriginCenter + (Params.Continents[i].DriftDirection * (Params.TectonicShift / 50.0f) * ShiftMultiplier);
-
-        // OPTIMALIZACE: Rychlé zjištìní vzdálenosti bez Sqrt dokud to není nutné
-        float D = FMath::Sqrt(FVector2D::DistSquared(FVector2D(WarpedX, WarpedY), EffCenter)) / FMath::Max(0.1f, RadiusMult);
-
-        if (D < Dist1) { Dist2 = Dist1; Dist1 = D; }
-        else if (D < Dist2) { Dist2 = D; }
+    if (Params.GlobalTerrainCache.IsValid() && Params.TotalWorldCellsX > 0 && Params.TotalWorldCellsY > 0) {
+        int32 X = FMath::Clamp(FMath::RoundToInt(GlobalX), 0, Params.TotalWorldCellsX - 1);
+        int32 Y = FMath::Clamp(FMath::RoundToInt(GlobalY), 0, Params.TotalWorldCellsY - 1);
+        return Params.GlobalTerrainCache.Get()->GetData()[Y * Params.TotalWorldCellsX + X].Elevation;
     }
-
-    float CoastSlider = FMath::Clamp(Params.CoastlineRoughness, 0.0f, 1.0f);
-    float PlainsSlider = FMath::Clamp(Params.LowlandFlatness, 0.0f, 1.0f);
-    float MountSlider = FMath::Clamp(Params.ElevationMultiplier / 6000.0f, 0.0f, 1.0f);
-    float TectSlider = FMath::Clamp(Params.TectonicMountainHeight / 6000.0f, 0.0f, 1.0f);
-
-    float ContCountScale = Params.ContinentCount <= 1 ? 1.0f : (1.4f / FMath::Sqrt((float)Params.ContinentCount));
-    float MaxDistBase = (WorldCellsX + WorldCellsY) * 0.38f * FMath::Max(0.2f, Params.ContinentSizeMultiplier) * ContCountScale;
-
-    float BaseShape = FMath::SmoothStep(0.0f, 1.0f, FMath::Clamp(1.0f - (Dist1 / FMath::Max(MaxDistBase, 1.0f)), 0.0f, 1.0f));
-
-    float PlainsExpansion = PlainsSlider * 0.25f;
-    float CoastNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 1.5f, 5, Params.MapSeed);
-    float CarveAmount = FMath::Lerp(0.05f, 0.35f, CoastSlider);
-
-    float RawTopo = BaseShape - (CoastNoise * CarveAmount) + PlainsExpansion;
-    float Topo = FMath::Clamp(RawTopo, 0.0f, 1.0f);
-
-    float EdgeDistX = FMath::Min(GlobalX, WorldCellsX - GlobalX);
-    float EdgeDistY = FMath::Min(GlobalY, WorldCellsY - GlobalY);
-    float MapEdgeMask = FMath::SmoothStep(0.0f, 1.0f, FMath::Clamp(FMath::Min(EdgeDistX, EdgeDistY) / 30.0f, 0.0f, 1.0f));
-    Topo *= MapEdgeMask;
-
-    float TectonicPressure = 0.0f;
-    if (Params.Continents.Num() > 1) {
-        float BoundaryThick = FMath::Max(1.0f, MaxDistBase * 0.4f);
-        float DistDiff = FMath::Abs(Dist1 - Dist2);
-        float CollisionRaw = FMath::Clamp(1.0f - (DistDiff / BoundaryThick), 0.0f, 1.0f);
-
-        float TectNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 0.8f, 3, Params.MapSeed + 500);
-        TectonicPressure = FMath::SmoothStep(0.0f, 1.0f, CollisionRaw) * FMath::SmoothStep(0.3f, 0.7f, TectNoise);
-    }
-
-    float Elev = 0.0f;
-    float T_Deep = 0.2f;
-    float CoastWidth = FMath::Lerp(0.05f, 0.25f, CoastSlider);
-    float T_Coast = T_Deep + CoastWidth;
-
-    if (Topo < T_Deep) {
-        float t = Topo / T_Deep;
-        Elev = FMath::Lerp(-800.0f, -10.0f, FMath::SmoothStep(0.0f, 1.0f, t));
-    }
-    else if (Topo < T_Coast) {
-        float t = (Topo - T_Deep) / (T_Coast - T_Deep);
-        Elev = FMath::Lerp(-10.0f, 2.0f, FMath::SmoothStep(0.0f, 1.0f, t));
-    }
-    else {
-        float InlandFade = (Topo - T_Coast) / (1.0f - T_Coast);
-        float t = FMath::SmoothStep(0.0f, 1.0f, InlandFade);
-
-        float BaseElev = 2.0f;
-
-        float PlainsNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 2.0f, 4, Params.MapSeed + 10);
-        float MaxHill = FMath::Lerp(450.0f, 20.0f, PlainsSlider);
-        float HillyTerrain = FMath::Pow(PlainsNoise, 1.2f) * MaxHill * t;
-
-        float RandMountNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 1.5f, 3, Params.MapSeed + 300);
-        float MountSpreadStart = FMath::Lerp(0.85f, 0.4f, MountSlider);
-        float RandMountMask = FMath::SmoothStep(MountSpreadStart, 1.0f, RandMountNoise);
-
-        float MountMask = FMath::Clamp(TectonicPressure + RandMountMask, 0.0f, 1.0f);
-        MountMask *= FMath::SmoothStep(0.1f, 0.4f, InlandFade);
-
-        float MountHeight = 0.0f;
-        if (MountMask > 0.0f) {
-            float Ridge = GetRidgedFBM(GlobalX, GlobalY, Params.NoiseScale * 2.5f, 6, Params.MapSeed + 400);
-            float MaxMountHeight = (MountSlider * 3500.0f) + (TectSlider * 3000.0f);
-            MountHeight = MountMask * Ridge * MaxMountHeight;
-        }
-
-        Elev = BaseElev + HillyTerrain + MountHeight;
-    }
-
-    float IslandChance = FMath::Clamp(Params.IslandFrequency, 0.0f, 1.0f);
-    if (IslandChance > 0.0f && MapEdgeMask > 0.1f) {
-        float IslandNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 5.0f, 3, Params.MapSeed + 200);
-        float Thresh = FMath::Clamp(1.0f - (IslandChance * 0.3f), 0.01f, 0.99f);
-
-        float OceanOnly = 1.0f - FMath::SmoothStep(T_Deep - 0.1f, T_Deep + 0.1f, Topo);
-        if (OceanOnly > 0.0f && IslandNoise > Thresh) {
-            float iMask = FMath::SmoothStep(0.0f, 1.0f, (IslandNoise - Thresh) / (1.0f - Thresh));
-            iMask *= OceanOnly;
-            float IslandPeak = FMath::Lerp(30.0f, 600.0f, MountSlider);
-            Elev = FMath::Max(Elev, FMath::Lerp(-200.0f, IslandPeak, iMask));
-        }
-    }
-
-    if (Params.VolcanicActivity > 0.0f) {
-        int32 CSize = Params.ChunkSize - 1;
-        int32 ChunkX = FMath::FloorToInt(GlobalX / CSize);
-        int32 ChunkY = FMath::FloorToInt(GlobalY / CSize);
-
-        for (int32 cy = ChunkY - 1; cy <= ChunkY + 1; cy++) {
-            for (int32 cx = ChunkX - 1; cx <= ChunkX + 1; cx++) {
-                if (cx < 0 || cx >= Params.WorldSizeInChunksX || cy < 0 || cy >= Params.WorldSizeInChunksY) continue;
-
-                FRandomStream VolcStream(Params.MapSeed + (cx * 103) + (cy * 17));
-
-                float VolcanicChance = Params.VolcanicActivity * 0.5f;
-                int32 VolcanoesToSpawn = FMath::FloorToInt(VolcanicChance);
-                if (VolcStream.FRand() < (VolcanicChance - VolcanoesToSpawn)) {
-                    VolcanoesToSpawn++;
-                }
-
-                for (int32 i = 0; i < VolcanoesToSpawn; i++) {
-                    int32 RandomIndex = VolcStream.RandRange(0, (CSize * CSize) - 1);
-                    float VolcX = (cx * CSize) + (RandomIndex % CSize);
-                    float VolcY = (cy * CSize) + (RandomIndex / CSize);
-
-                    float VolcZoneNoise = GetFBM(VolcX, VolcY, Params.NoiseScale * 0.8f, 3, Params.MapSeed + 500);
-                    if (VolcZoneNoise < 0.55f) continue;
-
-                    float DistSq = FVector2D::DistSquared(FVector2D(GlobalX, GlobalY), FVector2D(VolcX, VolcY));
-                    float VolcRadius = 25.0f;
-
-                    if (DistSq <= VolcRadius * VolcRadius) {
-                        float Falloff = FMath::SmoothStep(0.0f, 1.0f, 1.0f - (FMath::Sqrt(DistSq) / VolcRadius));
-                        Elev += (Params.LavaHeightBoost * Falloff);
-                    }
-                }
-            }
-        }
-    }
-
-    return Elev;
+    return Params.SeaLevel;
 }
 
 struct FRiverHead { FVector2D Pos; FVector2D Momentum; float Volume; int32 Life; };
@@ -169,7 +80,6 @@ void UHydroSystem::ProcessChunkWater(FChunkData& OutChunk, FVector2D ChunkCoord,
     float SeaLevel = Params.SeaLevel;
     int32 ChunkSize = Params.ChunkSize;
 
-    // OPTIMALIZACE: Nested loops
     ParallelFor(ChunkSize, [&](int32 Y) {
         for (int32 X = 0; X < ChunkSize; X++) {
             int32 i = X + Y * ChunkSize;
@@ -228,7 +138,7 @@ void UHydroSystem::ProcessChunkWater(FChunkData& OutChunk, FVector2D ChunkCoord,
     int32 EndY = FMath::Min(Params.WorldSizeInChunksY - 1, FMath::RoundToInt(ChunkCoord.Y) + SearchRadius);
 
     TArray<FRiverHead> ActiveRivers;
-    ActiveRivers.Reserve(100); // OPTIMALIZACE
+    ActiveRivers.Reserve(100);
 
     for (int32 cx = StartX; cx <= EndX; cx++) {
         for (int32 cy = StartY; cy <= EndY; cy++) {
@@ -313,7 +223,6 @@ void UHydroSystem::ProcessChunkWater(FChunkData& OutChunk, FVector2D ChunkCoord,
 
                             if (OutChunk.MicroCells[Idx].Elevation > SeaLevel) {
                                 float carveAlpha = FMath::Clamp(1.0f - (centerDist / (BaseCarveRadius + 0.5f)), 0.0f, 1.0f);
-
                                 float CarveDepth = FMath::Lerp(12.0f, 4.0f, LowlandAlpha);
                                 float targetRiverZ = FMath::Max(SeaLevel, CurrElev - CarveDepth);
                                 float originalZ = OutChunk.MicroCells[Idx].Elevation;
@@ -469,12 +378,17 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
     int32 GlobalStart = 0;
     int32 GlobalEnd = ChunkKeys.Num();
 
+    // ----------------------------------------------------
+    // FÁZE 1: FLOW DIRECTION (Smìrování vody)
+    // ----------------------------------------------------
     ParallelFor(GlobalEnd, [&](int32 idx) {
         FIntPoint Coord = ChunkKeys[idx];
         if (!WorldChunks.Contains(Coord)) return;
         FChunkData& Chunk = WorldChunks[Coord];
 
-        // OPTIMALIZACE: Zrušeno modulo dìlení
+        FHaloBuffer Halo;
+        Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
+
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
@@ -483,14 +397,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                 int32 GlobalY = (Coord.Y * CSize) + Y;
 
                 auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                    int32 lx = X + dx;
-                    int32 ly = Y + dy;
-                    if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
-                        return &Chunk.MicroCells[lx + ly * Manager->ChunkSize];
-                    }
-                    const FCellData* ExtCell = nullptr;
-                    Manager->GetCellGlobalPtr(GlobalX + dx, GlobalY + dy, ExtCell);
-                    return ExtCell;
+                    return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
                     };
 
                 if (Cell.Elevation <= Manager->SeaLevel) {
@@ -579,10 +486,16 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
     const float FlowCoefficient = 0.18f;
 
+    // ----------------------------------------------------
+    // FÁZE 2: WATER TRANSFER (Pøenos vody a síly proudu)
+    // ----------------------------------------------------
     ParallelFor(GlobalEnd, [&](int32 idx) {
         FIntPoint Coord = ChunkKeys[idx];
         if (!WorldChunks.Contains(Coord)) return;
         FChunkData& Chunk = WorldChunks[Coord];
+
+        FHaloBuffer Halo;
+        Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
 
         float LocalFlowCoefficient = Chunk.bGeomorphologyDirty ? 0.8f : FlowCoefficient;
 
@@ -596,14 +509,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                 int32 GlobalY = (Coord.Y * CSize) + Y;
 
                 auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                    int32 lx = X + dx;
-                    int32 ly = Y + dy;
-                    if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
-                        return &Chunk.MicroCells[lx + ly * Manager->ChunkSize];
-                    }
-                    const FCellData* ExtCell = nullptr;
-                    Manager->GetCellGlobalPtr(GlobalX + dx, GlobalY + dy, ExtCell);
-                    return ExtCell;
+                    return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
                     };
 
                 float SpringInput = 0.0f;
@@ -618,13 +524,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                 if (Cell.FlowDirectionGlobalX != -1 && Cell.FlowDirectionGlobalY != -1) {
                     int32 FlowDX = Cell.FlowDirectionGlobalX - GlobalX;
                     int32 FlowDY = Cell.FlowDirectionGlobalY - GlobalY;
-                    const FCellData* TargetCell = nullptr;
-                    if (FMath::Abs(FlowDX) <= 1 && FMath::Abs(FlowDY) <= 1) {
-                        TargetCell = GetNeighbor(FlowDX, FlowDY);
-                    }
-                    else {
-                        Manager->GetCellGlobalPtr(Cell.FlowDirectionGlobalX, Cell.FlowDirectionGlobalY, TargetCell);
-                    }
+                    const FCellData* TargetCell = GetNeighbor(FlowDX, FlowDY);
 
                     if (TargetCell) {
                         float Diff = (Cell.Elevation + Cell.SurfaceWater) - (TargetCell->Elevation + TargetCell->SurfaceWater);
@@ -708,10 +608,16 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         TArray<uint8> SafeFlags;
         SafeFlags.Init(0, GlobalEnd);
 
+        // ----------------------------------------------------
+        // FÁZE 4: GEOMORPHOLOGY (Vodní eroze a naplaveniny)
+        // ----------------------------------------------------
         ParallelFor(GlobalEnd, [&](int32 idx) {
             FIntPoint Coord = ChunkKeys[idx];
             if (!WorldChunks.Contains(Coord)) return;
             FChunkData& Chunk = WorldChunks[Coord];
+
+            FHaloBuffer Halo;
+            Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
 
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
@@ -720,14 +626,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                     int32 GlobalX = (Coord.X * CSize) + X; int32 GlobalY = (Coord.Y * CSize) + Y;
 
                     auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                        int32 lx = X + dx;
-                        int32 ly = Y + dy;
-                        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
-                            return &Chunk.MicroCells[lx + ly * Manager->ChunkSize];
-                        }
-                        const FCellData* ExtCell = nullptr;
-                        Manager->GetCellGlobalPtr(GlobalX + dx, GlobalY + dy, ExtCell);
-                        return ExtCell;
+                        return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
                         };
 
                     if (Cell.WaterType == EWaterType::Ocean || Cell.Elevation <= Manager->SeaLevel) {
@@ -826,9 +725,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                     if (Cell.FlowDirectionGlobalX != -1) {
                         int32 FlowDX = Cell.FlowDirectionGlobalX - GlobalX;
                         int32 FlowDY = Cell.FlowDirectionGlobalY - GlobalY;
-                        const FCellData* TargetCell = nullptr;
-                        if (FMath::Abs(FlowDX) <= 1 && FMath::Abs(FlowDY) <= 1) TargetCell = GetNeighbor(FlowDX, FlowDY);
-                        else Manager->GetCellGlobalPtr(Cell.FlowDirectionGlobalX, Cell.FlowDirectionGlobalY, TargetCell);
+                        const FCellData* TargetCell = GetNeighbor(FlowDX, FlowDY);
 
                         if (TargetCell) {
                             Slope = FMath::Max(0.0f, (Cell.Elevation + Cell.SurfaceWater) - (TargetCell->Elevation + TargetCell->SurfaceWater));
@@ -883,7 +780,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                     }
                     Cell.SedimentDelta -= MySedimentOutflow;
                 }
-            }
+            } // TATO ZAVORKA CHYBELA!!!
             });
 
         ParallelFor(GlobalEnd, [&](int32 idx) {
@@ -902,10 +799,16 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             }
             });
 
+        // ----------------------------------------------------
+        // FÁZE 6: SEDIMENT INFLOW (Sbìr naplavenin)
+        // ----------------------------------------------------
         ParallelFor(GlobalEnd, [&](int32 idx) {
             FIntPoint Coord = ChunkKeys[idx];
             if (!WorldChunks.Contains(Coord)) return;
             FChunkData& Chunk = WorldChunks[Coord];
+
+            FHaloBuffer Halo;
+            Halo.Fetch(Manager, Coord, CSize, Manager->ChunkSize);
 
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
@@ -915,14 +818,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                     int32 GlobalX = (Coord.X * CSize) + X; int32 GlobalY = (Coord.Y * CSize) + Y;
 
                     auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                        int32 lx = X + dx;
-                        int32 ly = Y + dy;
-                        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
-                            return &Chunk.MicroCells[lx + ly * Manager->ChunkSize];
-                        }
-                        const FCellData* ExtCell = nullptr;
-                        Manager->GetCellGlobalPtr(GlobalX + dx, GlobalY + dy, ExtCell);
-                        return ExtCell;
+                        return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
                         };
 
                     float SedimentInflow = 0.0f;

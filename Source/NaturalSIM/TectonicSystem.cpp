@@ -9,6 +9,61 @@
 UTectonicSystem::UTectonicSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UTectonicSystem::BeginPlay() { Super::BeginPlay(); }
 
+// OPTIMALIZACE 3: Struktura Halo Bufferu (Ghost Cells) zamezující volání GetCellGlobalPtr uvnitø smyèek
+struct FHaloBuffer {
+    TArray<FCellData> TopEdge, BotEdge, LftEdge, RgtEdge;
+    TArray<bool> HasT, HasB, HasL, HasR;
+    FCellData TL, TR, BL, BR;
+    bool HasTL = false, HasTR = false, HasBL = false, HasBR = false;
+    int32 CSize = 0, CS = 0, BaseGX = 0, BaseGY = 0;
+
+    void Fetch(ASimWorldManager* Manager, FIntPoint Coord, int32 InCSize, int32 InCS) {
+        CSize = InCSize; CS = InCS;
+        BaseGX = Coord.X * CSize; BaseGY = Coord.Y * CSize;
+        TopEdge.SetNumUninitialized(CSize); BotEdge.SetNumUninitialized(CSize);
+        LftEdge.SetNumUninitialized(CSize); RgtEdge.SetNumUninitialized(CSize);
+        HasT.Init(false, CSize); HasB.Init(false, CSize); HasL.Init(false, CSize); HasR.Init(false, CSize);
+
+        for (int x = 0; x < CSize; x++) {
+            const FCellData* c;
+            HasT[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY - 1, c); if (HasT[x]) TopEdge[x] = *c;
+            HasB[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY + CSize, c); if (HasB[x]) BotEdge[x] = *c;
+        }
+        for (int y = 0; y < CSize; y++) {
+            const FCellData* c;
+            HasL[y] = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + y, c); if (HasL[y]) LftEdge[y] = *c;
+            HasR[y] = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + y, c); if (HasR[y]) RgtEdge[y] = *c;
+        }
+        const FCellData* cor;
+        HasTL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY - 1, cor); if (HasTL) TL = *cor;
+        HasTR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY - 1, cor); if (HasTR) TR = *cor;
+        HasBL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + CSize, cor); if (HasBL) BL = *cor;
+        HasBR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + CSize, cor); if (HasBR) BR = *cor;
+    }
+
+    const FCellData* GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager) {
+        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) return &Chunk.MicroCells[lx + ly * CS];
+        if (lx >= -1 && lx <= CSize && ly >= -1 && ly <= CSize) {
+            if (ly < 0) {
+                if (lx < 0) return HasTL ? &TL : nullptr;
+                if (lx == CSize) return HasTR ? &TR : nullptr;
+                return HasT[lx] ? &TopEdge[lx] : nullptr;
+            }
+            if (ly == CSize) {
+                if (lx < 0) return HasBL ? &BL : nullptr;
+                if (lx == CSize) return HasBR ? &BR : nullptr;
+                return HasB[lx] ? &BotEdge[lx] : nullptr;
+            }
+            if (lx < 0) return HasL[ly] ? &LftEdge[ly] : nullptr;
+            if (lx == CSize) return HasR[ly] ? &RgtEdge[ly] : nullptr;
+        }
+        // Záložní vrstva (radius 2)
+        const FCellData* Fallback = nullptr;
+        Manager->GetCellGlobalPtr(BaseGX + lx, BaseGY + ly, Fallback);
+        return Fallback;
+    }
+};
+
 void UTectonicSystem::ProcessChunkTectonics(FChunkData& OutChunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params)
 {
     for (int32 i = 0; i < OutChunk.MicroCells.Num(); i++) {
@@ -57,17 +112,19 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             Chunk.FaultStress *= FMath::FRandRange(0.1f, 0.2f);
         }
 
-        auto GetLowestNeighbor = [&](int32 cx, int32 cy) -> FIntPoint {
-            const FCellData* cCell = nullptr;
-            Manager->GetCellGlobalPtr(cx, cy, cCell);
+        // OPTIMALIZACE 3: Naètení hranic chunku do L1 Cache
+        FHaloBuffer Halo;
+        Halo.Fetch(Manager, ChunkKeys[idx], CSize, Manager->ChunkSize);
+
+        auto GetLowestNeighbor = [&](int32 cx, int32 cy, int32 lx, int32 ly) -> FIntPoint {
+            const FCellData* cCell = Halo.GetNeighbor(lx, ly, Chunk, Manager);
             if (!cCell) return FIntPoint(cx, cy);
 
             float lowestH = cCell->Elevation + cCell->Lava;
             FIntPoint bestP(cx, cy);
 
             for (int i = 0; i < 8; i++) {
-                const FCellData* nCell = nullptr;
-                Manager->GetCellGlobalPtr(cx + Offsets[i][0], cy + Offsets[i][1], nCell);
+                const FCellData* nCell = Halo.GetNeighbor(lx + Offsets[i][0], ly + Offsets[i][1], Chunk, Manager);
                 if (nCell) {
                     float h = nCell->Elevation + nCell->Lava;
                     if (h < lowestH - 0.05f) {
@@ -121,11 +178,13 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                 float MyLavaDelta = 0.0f;
                 float MyHead = Cell.Elevation + Cell.Lava;
 
-                FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY);
+                FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY, X, Y);
 
                 if (TargetFlow.X != GlobalX || TargetFlow.Y != GlobalY) {
-                    const FCellData* TargetCell = nullptr;
-                    Manager->GetCellGlobalPtr(TargetFlow.X, TargetFlow.Y, TargetCell);
+                    int32 flowLx = X + (TargetFlow.X - GlobalX);
+                    int32 flowLy = Y + (TargetFlow.Y - GlobalY);
+                    const FCellData* TargetCell = Halo.GetNeighbor(flowLx, flowLy, Chunk, Manager);
+
                     if (TargetCell) {
                         float TargetHead = TargetCell->Elevation + TargetCell->Lava;
                         float Diff = MyHead - TargetHead;
@@ -139,12 +198,13 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                 for (int32 n = 0; n < 8; n++) {
                     int32 nx = GlobalX + Offsets[n][0];
                     int32 ny = GlobalY + Offsets[n][1];
+                    int32 nlx = X + Offsets[n][0];
+                    int32 nly = Y + Offsets[n][1];
 
-                    const FCellData* NCell = nullptr;
-                    Manager->GetCellGlobalPtr(nx, ny, NCell);
+                    const FCellData* NCell = Halo.GetNeighbor(nlx, nly, Chunk, Manager);
 
                     if (NCell && NCell->Lava > 0.0f) {
-                        FIntPoint NeighborTarget = GetLowestNeighbor(nx, ny);
+                        FIntPoint NeighborTarget = GetLowestNeighbor(nx, ny, nlx, nly);
                         if (NeighborTarget.X == GlobalX && NeighborTarget.Y == GlobalY) {
                             float nHead = NCell->Elevation + NCell->Lava;
                             float Diff = nHead - MyHead;
@@ -158,7 +218,6 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             }
         }
 
-        // OPTIMALIZACE: Nested loops
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
