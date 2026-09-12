@@ -30,40 +30,36 @@ void ASimPlayerController::HandleMapClick()
     FVector WorldLocation, WorldDirection;
     if (DeprojectMousePositionToWorld(WorldLocation, WorldDirection)) {
 
-        // Softwarovy Raymarch (Matematicky prusecik paprsku s nasim voxelovym svetem)
         FVector RayPos = WorldLocation;
-        FVector RayStep = WorldDirection * 100.0f; // Krok paprsku (100 jednotek)
+        FVector RayStep = WorldDirection * 100.0f;
         FVector HitLoc = FVector::ZeroVector;
         bool bHit = false;
 
-        // Rychly posun paprsku bliz k zemi, pokud je kamera moc vysoko (optimalizace smycky)
         if (RayPos.Z > 15000.0f && WorldDirection.Z < 0.0f) {
             float DistToTop = (15000.0f - RayPos.Z) / WorldDirection.Z;
             RayPos += WorldDirection * DistToTop;
         }
 
-        // Paprsek leti smerem dolu a hleda naraz do terenu
         for (int i = 0; i < 2000; i++) {
             RayPos += RayStep;
 
-            // Pokud jsme propadli pod mapu (bezpecnostni pojistka)
             if (RayPos.Z < -2000.0f) {
                 HitLoc = RayPos;
                 bHit = true;
                 break;
             }
 
-            FCellData Cell;
-            if (WorldManager->GetCellDataAtLocation(RayPos, Cell)) {
-                // Pokud paprsek klesl pod nebo na uroven terenu bunky = ZASAH!
-                if (RayPos.Z <= Cell.Elevation) {
+            // OPTIMALIZACE 4: Podpora pro SOA architekturu ve virtuálním raycastu
+            FCellStaticData SCell;
+            FCellDynamicData DCell;
+            if (WorldManager->GetCellDataAtLocation(RayPos, SCell, DCell)) {
+                if (RayPos.Z <= SCell.Elevation) {
                     HitLoc = RayPos;
                     bHit = true;
                     break;
                 }
             }
             else if (RayPos.Z <= WorldManager->SeaLevel) {
-                // Kliknuti mimo vygenerovane chunky (do oceanu)
                 HitLoc = RayPos;
                 bHit = true;
                 break;
@@ -71,17 +67,11 @@ void ASimPlayerController::HandleMapClick()
         }
 
         if (bHit) {
-            // Vykresleni zelene kulicky v miste kliknuti pro vizualni kontrolu
             DrawDebugSphere(GetWorld(), HitLoc, 80.0f, 12, FColor::Green, false, 2.0f);
-
-            // ZAVOLAME SKRYTI VSECH OKEN PREDTIM, NEZ OTEVREME NOVE
             HideAllPanels();
 
-            // 1. NEJVYSSI PRIORITA: Kontrola kliknuti na oko katastrofy
             if (WorldManager->DisasterModule) {
                 for (const FDisasterWarning& Warning : WorldManager->DisasterModule->ActiveWarnings) {
-                    // Detekce ve 2D rovine. Kdyz hrac klikne na oko na obloze, paprsek dopadne
-                    // na zem presne pod okem. Zamerovaci radius 1500 jednotek (1.5 chunky) je velmi velkorysy.
                     if (FVector2D::Distance(FVector2D(HitLoc.X, HitLoc.Y), Warning.Epicenter) < 1500.0f) {
                         OnDisasterSelected(Warning);
                         return;
@@ -107,9 +97,11 @@ void ASimPlayerController::HandleMapClick()
                 return;
             }
 
-            FCellData ClickedCell;
-            if (WorldManager->GetCellDataAtLocation(HitLoc, ClickedCell)) {
-                OnCellSelected(ClickedCell);
+            // OPTIMALIZACE 4: Naètení detailù o buòce a odeslání do UI
+            FCellStaticData ClickedStatic;
+            FCellDynamicData ClickedDynamic;
+            if (WorldManager->GetCellDataAtLocation(HitLoc, ClickedStatic, ClickedDynamic)) {
+                OnCellSelected(ClickedStatic, ClickedDynamic);
                 return;
             }
         }

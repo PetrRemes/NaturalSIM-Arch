@@ -18,11 +18,12 @@ void UFaunaSystem::InitializeFauna(ASimWorldManager* Manager)
         const FChunkData& Chunk = Pair.Value;
         FIntPoint ChunkCoord = Pair.Key;
 
-        for (int32 i = 0; i < Chunk.MicroCells.Num(); i++) {
-            const FCellData& Cell = Chunk.MicroCells[i];
+        for (int32 i = 0; i < Chunk.StaticCells.Num(); i++) {
+            const FCellStaticData& SCell = Chunk.StaticCells[i];
+            const FCellDynamicData& DCell = Chunk.DynamicCells[i];
 
-            if (Cell.Elevation > Manager->SeaLevel && Cell.Elevation < Manager->SeaLevel + 500.0f && Cell.SurfaceWater < 0.1f && !Cell.bIsVolcano) {
-                if (Cell.FloraDensity > 0.2f || Cell.Biome == EBiomeType::Grassland || Cell.Biome == EBiomeType::DeciduousForest) {
+            if (SCell.Elevation > Manager->SeaLevel && SCell.Elevation < Manager->SeaLevel + 500.0f && DCell.SurfaceWater < 0.1f && !SCell.bIsVolcano) {
+                if (DCell.FloraDensity > 0.2f || SCell.Biome == EBiomeType::Grassland || SCell.Biome == EBiomeType::DeciduousForest) {
                     int32 X = i % ChunkSize; int32 Y = i / ChunkSize;
                     float WorldX = (ChunkCoord.X * (ChunkSize - 1) * CellSize) + (X * CellSize);
                     float WorldY = (ChunkCoord.Y * (ChunkSize - 1) * CellSize) + (Y * CellSize);
@@ -91,28 +92,28 @@ float UFaunaSystem::EvaluateHabitat(ASimWorldManager* Manager, FVector2D Positio
     int32 GlobalX = FMath::FloorToInt(Position.X / 50.0f);
     int32 GlobalY = FMath::FloorToInt(Position.Y / 50.0f);
 
-    const FCellData* CellPtr = nullptr;
-    if (Manager->GetCellGlobalPtr(GlobalX, GlobalY, CellPtr)) {
+    FCellStaticData SCell; FCellDynamicData DCell;
+    if (Manager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) {
 
-        if (CellPtr->Elevation <= Manager->SeaLevel) return -9999.0f;
-        if (CellPtr->SurfaceWater > 1.0f) return -5000.0f;
-        if (CellPtr->Elevation > Manager->SeaLevel + 600.0f) return -5000.0f;
+        if (SCell.Elevation <= Manager->SeaLevel) return -9999.0f;
+        if (DCell.SurfaceWater > 1.0f) return -5000.0f;
+        if (SCell.Elevation > Manager->SeaLevel + 600.0f) return -5000.0f;
 
-        if (CellPtr->DangerLevel > 0.1f || CellPtr->bIsVolcano) Score -= 2000.0f;
-        if (CellPtr->HouseDensity > 0.0f) Score -= 1000.0f;
+        if (DCell.DangerLevel > 0.1f || SCell.bIsVolcano) Score -= 2000.0f;
+        if (DCell.HouseDensity > 0.0f) Score -= 1000.0f;
 
-        if (CellPtr->SurfaceWater > 0.05f && CellPtr->SurfaceWater <= 0.8f) Score += 100.0f;
-        if (CellPtr->RiverDischarge > 0.5f) Score += 150.0f;
+        if (DCell.SurfaceWater > 0.05f && DCell.SurfaceWater <= 0.8f) Score += 100.0f;
+        if (DCell.RiverDischarge > 0.5f) Score += 150.0f;
 
         if (Animal.Type == EAnimalType::Herbivore) {
-            Score += CellPtr->FloraDensity * 200.0f;
-            if (CellPtr->Biome == EBiomeType::Grassland) Score += 50.0f;
-            if (CellPtr->TreeType != ETreeType::None) Score -= 30.0f;
+            Score += DCell.FloraDensity * 200.0f;
+            if (SCell.Biome == EBiomeType::Grassland) Score += 50.0f;
+            if (SCell.TreeType != ETreeType::None) Score -= 30.0f;
         }
         else if (Animal.Type == EAnimalType::ForestAnimal) {
-            Score += CellPtr->WoodAmount * 0.5f;
-            Score += CellPtr->BerryBushes * 10.0f;
-            if (CellPtr->TreeType != ETreeType::None) Score += 100.0f;
+            Score += DCell.WoodAmount * 0.5f;
+            Score += DCell.BerryBushes * 10.0f;
+            if (SCell.TreeType != ETreeType::None) Score += 100.0f;
         }
     }
     return Score;
@@ -159,7 +160,6 @@ void UFaunaSystem::ProcessFaunaSlice(TMap<FIntPoint, FChunkData>& WorldChunks, A
                     Score -= 500.0f;
                 }
 
-                // OPRAVA PATHTRACINGU: Line-Of-Sight Raycast vùèi vodním plochám
                 bool bPathClear = true;
                 FVector2D RayStep = (SamplePos - Animal.Position).GetSafeNormal() * CellSize;
                 int32 Steps = FMath::FloorToInt(Dist / CellSize);
@@ -169,17 +169,16 @@ void UFaunaSystem::ProcessFaunaSlice(TMap<FIntPoint, FChunkData>& WorldChunks, A
                     RayPos += RayStep;
                     int32 rx = FMath::FloorToInt(RayPos.X / CellSize);
                     int32 ry = FMath::FloorToInt(RayPos.Y / CellSize);
-                    const FCellData* rCell = nullptr;
-                    if (Manager->GetCellGlobalPtr(rx, ry, rCell)) {
-                        // Pokud je v cestì hlubší øeka nebo moøe, cesta je zablokovaná
-                        if (rCell->Elevation <= Manager->SeaLevel || rCell->SurfaceWater > 0.8f) {
+
+                    FCellStaticData rCellS; FCellDynamicData rCellD;
+                    if (Manager->GetCellGlobal(rx, ry, rCellS, rCellD)) {
+                        if (rCellS.Elevation <= Manager->SeaLevel || rCellD.SurfaceWater > 0.8f) {
                             bPathClear = false;
                             break;
                         }
                     }
                 }
 
-                // Brutální penalizace, pokud zvíøe vidí v cestì vodu (nepùjde tam)
                 if (!bPathClear) Score -= 15000.0f;
 
                 if (Score > BestScore) {
@@ -250,11 +249,9 @@ void UFaunaSystem::ProcessFaunaSlice(TMap<FIntPoint, FChunkData>& WorldChunks, A
 
         int32 NextGX = FMath::FloorToInt(NextPos.X / CellSize);
         int32 NextGY = FMath::FloorToInt(NextPos.Y / CellSize);
-        const FCellData* NextCell = nullptr;
-        if (Manager->GetCellGlobalPtr(NextGX, NextGY, NextCell)) {
-            if (NextCell->Elevation <= Manager->SeaLevel || NextCell->SurfaceWater > 0.8f) {
-                // OPRAVA PATHTRACINGU: Pokud zvíøe nechtìnì vbìhne do vody, odrazí se
-                // a hlavnì okamžitì zahodí svùj cíl, aby nevibrovalo a ihned našlo nový!
+        FCellStaticData NextSCell; FCellDynamicData NextDCell;
+        if (Manager->GetCellGlobal(NextGX, NextGY, NextSCell, NextDCell)) {
+            if (NextSCell.Elevation <= Manager->SeaLevel || NextDCell.SurfaceWater > 0.8f) {
                 Animal.TargetDirection = -Animal.TargetDirection;
                 NextPos = Animal.Position + Animal.TargetDirection * MovementSpeed * DeltaTime;
 
@@ -265,29 +262,29 @@ void UFaunaSystem::ProcessFaunaSlice(TMap<FIntPoint, FChunkData>& WorldChunks, A
 
         Animal.Position = NextPos;
 
-        FCellData* CCell = nullptr; FIntPoint CCoord;
-        if (Manager->GetMutableCellGlobal(CurrGX, CurrGY, CCell, CCoord)) {
+        FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint CCoord;
+        if (Manager->GetMutableCellGlobal(CurrGX, CurrGY, SCell, DCell, CCoord)) {
 
             float EatAmount = Animal.HerdSize * 0.1f * DeltaTime;
 
             if (Animal.Type == EAnimalType::Herbivore || Animal.Type == EAnimalType::ForestAnimal) {
-                if (CCell->FloraDensity > 0.05f) {
-                    CCell->FloraDensity = FMath::Max(0.0f, CCell->FloraDensity - EatAmount * 0.2f);
+                if (DCell->FloraDensity > 0.05f) {
+                    DCell->FloraDensity = FMath::Max(0.0f, DCell->FloraDensity - EatAmount * 0.2f);
                     Animal.Hunger = FMath::Max(0.0f, Animal.Hunger - EatAmount * 15.0f);
-                    CCell->GrazingPressure = FMath::Min(100.0f, CCell->GrazingPressure + EatAmount * 10.0f);
+                    DCell->GrazingPressure = FMath::Min(100.0f, DCell->GrazingPressure + EatAmount * 10.0f);
 
                     Manager->RegisterVisualChange(CCoord, EChunkVisualDirty::Flora | EChunkVisualDirty::Terrain);
                 }
-                else if (CCell->BerryBushes > 0.0f) {
-                    CCell->BerryBushes = FMath::Max(0.0f, CCell->BerryBushes - EatAmount);
+                else if (DCell->BerryBushes > 0.0f) {
+                    DCell->BerryBushes = FMath::Max(0.0f, DCell->BerryBushes - EatAmount);
                     Animal.Hunger = FMath::Max(0.0f, Animal.Hunger - EatAmount * 25.0f);
                     Manager->RegisterVisualChange(CCoord, EChunkVisualDirty::Flora);
                 }
             }
 
             if (Animal.Type == EAnimalType::Predator) {
-                if (CCell->AnimalBones > 0.0f) {
-                    CCell->AnimalBones = FMath::Max(0.0f, CCell->AnimalBones - EatAmount);
+                if (DCell->AnimalBones > 0.0f) {
+                    DCell->AnimalBones = FMath::Max(0.0f, DCell->AnimalBones - EatAmount);
                     Animal.Hunger = FMath::Max(0.0f, Animal.Hunger - EatAmount * 20.0f);
                     Manager->RegisterVisualChange(CCoord, EChunkVisualDirty::Terrain);
                 }
@@ -298,8 +295,8 @@ void UFaunaSystem::ProcessFaunaSlice(TMap<FIntPoint, FChunkData>& WorldChunks, A
             float StarveAmount = FMath::Min(Animal.HerdSize, 3.0f * DeltaTime);
             Animal.HerdSize -= StarveAmount;
 
-            if (CCell) {
-                CCell->AnimalBones += StarveAmount * 2.0f;
+            if (DCell) {
+                DCell->AnimalBones += StarveAmount * 2.0f;
                 Manager->RegisterVisualChange(CCoord, EChunkVisualDirty::Terrain);
             }
         }

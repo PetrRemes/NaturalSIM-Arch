@@ -177,7 +177,6 @@ static void GetZonedTerrain(float GlobalX, float GlobalY, const FChunkGeneration
     OutElev = Elev;
 }
 
-// OPTIMALIZACE 2: Zde se poprvÈ asynchronnÏ spoËÌt· kompletnÌ mapa. Zbytek modul˘ uû jen Ëte pamÏù!
 void UWorldGeneratorSystem::GenerateGlobalTerrainCache(TArray<FPrecomputedTerrain>& OutCache, const FChunkGenerationParameters& Params)
 {
     ParallelFor(Params.TotalWorldCellsY, [&](int32 Y) {
@@ -197,9 +196,9 @@ void UWorldGeneratorSystem::GenerateGlobalTerrainCache(TArray<FPrecomputedTerrai
 
 void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params)
 {
-    if (OutChunk.MicroCells.Num() == 0) return;
+    if (OutChunk.StaticCells.Num() == 0 || OutChunk.DynamicCells.Num() == 0) return;
 
-    int32 ChunkSize = FMath::RoundToInt(FMath::Sqrt((float)OutChunk.MicroCells.Num()));
+    int32 ChunkSize = FMath::RoundToInt(FMath::Sqrt((float)OutChunk.StaticCells.Num()));
     float TotalTectPressure = 0.0f;
 
     for (int32 Y = 0; Y < ChunkSize; Y++)
@@ -207,14 +206,14 @@ void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D 
         for (int32 X = 0; X < ChunkSize; X++)
         {
             int32 i = X + Y * ChunkSize;
-            if (i >= OutChunk.MicroCells.Num()) continue;
+            if (i >= OutChunk.StaticCells.Num()) continue;
 
-            FCellData& Cell = OutChunk.MicroCells[i];
+            FCellStaticData& SCell = OutChunk.StaticCells[i];
+            FCellDynamicData& DCell = OutChunk.DynamicCells[i];
 
             int32 GlobalX = (ChunkCoord.X * (ChunkSize - 1)) + X;
             int32 GlobalY = (ChunkCoord.Y * (ChunkSize - 1)) + Y;
 
-            // OPTIMALIZACE 2: NamÌsto milionu drah˝ch funkcÌ GetZonedTerrain jen sah·me do p¯ipravenÈ pamÏti!
             int32 LookupX = FMath::Clamp(GlobalX, 0, Params.TotalWorldCellsX - 1);
             int32 LookupY = FMath::Clamp(GlobalY, 0, Params.TotalWorldCellsY - 1);
 
@@ -223,56 +222,56 @@ void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D 
                 CachedT = Params.GlobalTerrainCache.Get()->GetData()[LookupY * Params.TotalWorldCellsX + LookupX];
             }
 
-            Cell.Elevation = CachedT.Elevation;
-            Cell.bIsVolcano = CachedT.bIsVolcano;
-            Cell.Lava = CachedT.LavaAmount;
+            SCell.Elevation = CachedT.Elevation;
+            SCell.bIsVolcano = CachedT.bIsVolcano;
+            DCell.Lava = CachedT.LavaAmount;
             TotalTectPressure += CachedT.TectonicPressure;
 
-            if (Cell.bIsVolcano || Cell.Lava > 0.1f) {
-                if (Cell.bIsVolcano) Cell.Lava = 100.0f;
-                Cell.Bedrock = EBedrockType::Rock;
+            if (SCell.bIsVolcano || DCell.Lava > 0.1f) {
+                if (SCell.bIsVolcano) DCell.Lava = 100.0f;
+                SCell.Bedrock = EBedrockType::Rock;
             }
             else {
-                Cell.Bedrock = (Cell.Elevation > Params.SeaLevel + 300.0f) ? EBedrockType::Rock : EBedrockType::Dirt;
+                SCell.Bedrock = (SCell.Elevation > Params.SeaLevel + 300.0f) ? EBedrockType::Rock : EBedrockType::Dirt;
             }
 
-            if (Cell.Elevation <= Params.SeaLevel + 25.0f && Cell.Elevation >= Params.SeaLevel - 15.0f) {
-                Cell.Bedrock = EBedrockType::Sand;
+            if (SCell.Elevation <= Params.SeaLevel + 25.0f && SCell.Elevation >= Params.SeaLevel - 15.0f) {
+                SCell.Bedrock = EBedrockType::Sand;
             }
 
-            Cell.StoneAmount = 0.0f;
-            Cell.MineralOre = 0.0f;
-            Cell.ClayAmount = 0.0f;
-            Cell.SandAmount = 0.0f;
+            SCell.StoneAmount = 0.0f;
+            SCell.MineralOre = 0.0f;
+            SCell.ClayAmount = 0.0f;
+            SCell.SandAmount = 0.0f;
 
-            if (Cell.Bedrock == EBedrockType::Rock) {
+            if (SCell.Bedrock == EBedrockType::Rock) {
                 float StoneNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 8.0f, 3, Params.MapSeed + 111);
-                float BaseStone = FMath::Max(0.0f, Cell.Elevation - (Params.SeaLevel + 200.0f));
-                Cell.StoneAmount = 5000.0f + (BaseStone * 15.0f) + (StoneNoise * 2000.0f);
+                float BaseStone = FMath::Max(0.0f, SCell.Elevation - (Params.SeaLevel + 200.0f));
+                SCell.StoneAmount = 5000.0f + (BaseStone * 15.0f) + (StoneNoise * 2000.0f);
             }
 
             float OreNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 25.0f, 2, Params.MapSeed + 888);
             float OreThreshold = FMath::Lerp(0.92f, 0.70f, CachedT.TectonicPressure);
-            if (Cell.bIsVolcano) OreThreshold -= 0.15f;
+            if (SCell.bIsVolcano) OreThreshold -= 0.15f;
 
             if (OreNoise > OreThreshold) {
-                Cell.MineralOre = (OreNoise - OreThreshold) * 15000.0f;
+                SCell.MineralOre = (OreNoise - OreThreshold) * 15000.0f;
             }
 
-            if (Cell.Bedrock == EBedrockType::Sand) {
+            if (SCell.Bedrock == EBedrockType::Sand) {
                 float SandNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 5.0f, 2, Params.MapSeed + 666);
-                Cell.SandAmount = 2000.0f + (SandNoise * 1500.0f);
+                SCell.SandAmount = 2000.0f + (SandNoise * 1500.0f);
             }
 
-            if (Cell.Bedrock == EBedrockType::Dirt && Cell.Elevation < Params.SeaLevel + 60.0f && Cell.Elevation > Params.SeaLevel) {
+            if (SCell.Bedrock == EBedrockType::Dirt && SCell.Elevation < Params.SeaLevel + 60.0f && SCell.Elevation > Params.SeaLevel) {
                 float ClayNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 4.0f, 3, Params.MapSeed + 555);
                 if (ClayNoise > 0.65f) {
-                    Cell.ClayAmount = (ClayNoise - 0.65f) * 8000.0f;
+                    SCell.ClayAmount = (ClayNoise - 0.65f) * 8000.0f;
                 }
             }
         }
     }
 
-    OutChunk.BaseTectonicPressure = TotalTectPressure / OutChunk.MicroCells.Num();
+    OutChunk.BaseTectonicPressure = TotalTectPressure / OutChunk.StaticCells.Num();
     OutChunk.FaultStress = FMath::FRandRange(0.0f, 50.0f);
 }

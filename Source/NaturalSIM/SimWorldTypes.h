@@ -227,11 +227,48 @@ struct FChunkHeatmap
     UPROPERTY() float AvgRainfall = 0.0f;
 };
 
+// =========================================================================
+// OPTIMALIZACE 4: SOA (Structure of Arrays) rozdìlení pùvodního FCellData
+// =========================================================================
+
+// Statická data: Základní geologie, tvar, biom a vlastnictví (Mìní se zøídka)
 USTRUCT(BlueprintType)
-struct FCellData
+struct FCellStaticData
 {
     GENERATED_BODY()
     UPROPERTY(BlueprintReadWrite) float Elevation = 0.0f;
+    UPROPERTY(BlueprintReadWrite) EBedrockType Bedrock = EBedrockType::Dirt;
+    UPROPERTY(BlueprintReadWrite) ESoilType SoilType = ESoilType::Dirt;
+    UPROPERTY(BlueprintReadWrite) float SoilDepth = 0.0f;
+    UPROPERTY(BlueprintReadWrite) bool bIsVolcano = false;
+    UPROPERTY(BlueprintReadWrite) FLinearColor BiomeColor = FLinearColor::Green;
+    UPROPERTY(BlueprintReadWrite) ETreeType TreeType = ETreeType::None;
+    UPROPERTY(BlueprintReadWrite) EBiomeType Biome = EBiomeType::Grassland;
+    UPROPERTY(BlueprintReadWrite) float StoneAmount = 0.0f;
+    UPROPERTY(BlueprintReadWrite) float MineralOre = 0.0f;
+    UPROPERTY(BlueprintReadWrite) float ClayAmount = 0.0f;
+    UPROPERTY(BlueprintReadWrite) float SandAmount = 0.0f;
+    UPROPERTY(BlueprintReadWrite) EWaterType WaterType = EWaterType::None;
+    UPROPERTY(BlueprintReadWrite) bool bIsSpring = false;
+    UPROPERTY(BlueprintReadWrite) float SpringStrength = 0.0f;
+    UPROPERTY(BlueprintReadWrite) float ChannelWidth = 0.0f;
+    UPROPERTY(BlueprintReadWrite) float ChannelDepth = 0.0f;
+    UPROPERTY(BlueprintReadWrite) float BankHeight = 0.0f;
+    UPROPERTY(BlueprintReadWrite) bool bHasRoad = false;
+    UPROPERTY(BlueprintReadWrite) EBuildingType BuildingType = EBuildingType::None;
+    UPROPERTY(BlueprintReadWrite) int32 OwnerSettlementID = -1;
+    UPROPERTY(BlueprintReadWrite) int32 OwnerNationID = -1;
+    UPROPERTY(BlueprintReadWrite) FLinearColor PoliticalColor = FLinearColor::Transparent;
+    UPROPERTY(BlueprintReadWrite) uint8 TreeSpeciesID = 0;
+    UPROPERTY(BlueprintReadWrite) int32 FlowDirectionGlobalX = -1;
+    UPROPERTY(BlueprintReadWrite) int32 FlowDirectionGlobalY = -1;
+};
+
+// Dynamická data: Voda, Oheò, Listí, Zneèištìní (Poèítá se každý tik)
+USTRUCT(BlueprintType)
+struct FCellDynamicData
+{
+    GENERATED_BODY()
     UPROPERTY(BlueprintReadWrite) float ElevationDelta = 0.0f;
     UPROPERTY(BlueprintReadWrite) float SedimentDelta = 0.0f;
     UPROPERTY(BlueprintReadWrite) float SurfaceWater = 0.0f;
@@ -241,91 +278,51 @@ struct FCellData
     UPROPERTY(BlueprintReadWrite) float SnowAmount = 0.0f;
     UPROPERTY(BlueprintReadWrite) float GlacierIce = 0.0f;
     UPROPERTY(BlueprintReadWrite) float Temperature = 0.0f;
-    UPROPERTY(BlueprintReadWrite) EBedrockType Bedrock = EBedrockType::Dirt;
-
-    UPROPERTY(BlueprintReadWrite) ESoilType SoilType = ESoilType::Dirt;
     UPROPERTY(BlueprintReadWrite) float SoilFertility = 0.0f;
     UPROPERTY(BlueprintReadWrite) float SoilMoisture = 0.0f;
     UPROPERTY(BlueprintReadWrite) float OrganicMatter = 0.0f;
-    UPROPERTY(BlueprintReadWrite) float SoilDepth = 0.0f;
-
     UPROPERTY(BlueprintReadWrite) float GrassDensity = 0.0f;
     UPROPERTY(BlueprintReadWrite) float ShrubDensity = 0.0f;
     UPROPERTY(BlueprintReadWrite) float FloraDensity = 0.0f;
     UPROPERTY(BlueprintReadWrite) float ForestDensity = 0.0f;
     UPROPERTY(BlueprintReadWrite) float TreeSeedBank = 0.0f;
     UPROPERTY(BlueprintReadWrite) float ShrubSeedBank = 0.0f;
-
-    UPROPERTY(BlueprintReadWrite) bool bIsVolcano = false;
     UPROPERTY(BlueprintReadWrite) float Lava = 0.0f;
     UPROPERTY(BlueprintReadWrite) float LavaBuffer = 0.0f;
-    UPROPERTY(BlueprintReadWrite) FLinearColor BiomeColor = FLinearColor::Green;
     UPROPERTY(BlueprintReadWrite) float WaterPollution = 0.0f;
     UPROPERTY(BlueprintReadWrite) float DangerLevel = 0.0f;
     UPROPERTY(BlueprintReadWrite) float HouseDensity = 0.0f;
     UPROPERTY(BlueprintReadWrite) float Pressure = 1013.0f;
     UPROPERTY(BlueprintReadWrite) float Humidity = 0.0f;
     UPROPERTY(BlueprintReadWrite) FVector2D WindVector = FVector2D(1.0f, 0.5f);
-
     UPROPERTY(BlueprintReadWrite) float FireIntensity = 0.0f;
     UPROPERTY(BlueprintReadWrite) float FireIntensityBuffer = 0.0f;
-
-    UPROPERTY(BlueprintReadWrite) ETreeType TreeType = ETreeType::None;
-    UPROPERTY(BlueprintReadWrite) EBiomeType Biome = EBiomeType::Grassland;
     UPROPERTY(BlueprintReadWrite) float WoodAmount = 0.0f;
     UPROPERTY(BlueprintReadWrite) float EdibleFlora = 0.0f;
     UPROPERTY(BlueprintReadWrite) float BerryBushes = 0.0f;
-    UPROPERTY(BlueprintReadWrite) float StoneAmount = 0.0f;
-    UPROPERTY(BlueprintReadWrite) float MineralOre = 0.0f;
-    UPROPERTY(BlueprintReadWrite) float ClayAmount = 0.0f;
-    UPROPERTY(BlueprintReadWrite) float SandAmount = 0.0f;
     UPROPERTY(BlueprintReadWrite) float AnimalBones = 0.0f;
     UPROPERTY(BlueprintReadWrite) float CloudDensity = 0.0f;
-    UPROPERTY(BlueprintReadWrite) EWaterType WaterType = EWaterType::None;
-    UPROPERTY(BlueprintReadWrite) bool bIsSpring = false;
-    UPROPERTY(BlueprintReadWrite) float SpringStrength = 0.0f;
-
     UPROPERTY(BlueprintReadWrite) float FlowPersistence = 0.0f;
     UPROPERTY(BlueprintReadWrite) float FlowPersistenceBuffer = 0.0f;
-
     UPROPERTY(BlueprintReadWrite) float WaterFlow = 0.0f;
     UPROPERTY(BlueprintReadWrite) float Sediment = 0.0f;
     UPROPERTY(BlueprintReadWrite) float SedimentInflowBuffer = 0.0f;
     UPROPERTY(BlueprintReadWrite) float DepositedSediment = 0.0f;
-
     UPROPERTY(BlueprintReadWrite) float RiverDischarge = 0.0f;
     UPROPERTY(BlueprintReadWrite) float RiverDischargeBuffer = 0.0f;
-
     UPROPERTY(BlueprintReadWrite) float RiverDepth = 0.0f;
     UPROPERTY(BlueprintReadWrite) float RiverWidth = 0.0f;
     UPROPERTY(BlueprintReadWrite) float WaterInflowBuffer = 0.0f;
-    UPROPERTY(BlueprintReadWrite) int32 FlowDirectionGlobalX = -1;
-    UPROPERTY(BlueprintReadWrite) int32 FlowDirectionGlobalY = -1;
-    UPROPERTY(BlueprintReadWrite) float ChannelWidth = 0.0f;
-    UPROPERTY(BlueprintReadWrite) float ChannelDepth = 0.0f;
-    UPROPERTY(BlueprintReadWrite) float BankHeight = 0.0f;
-    UPROPERTY(BlueprintReadWrite) bool bHasRoad = false;
-
-    UPROPERTY(BlueprintReadWrite) EBuildingType BuildingType = EBuildingType::None;
-
     UPROPERTY(BlueprintReadWrite) float GrazingPressure = 0.0f;
     UPROPERTY(BlueprintReadWrite) float SeedSpread = 0.0f;
-
     UPROPERTY(BlueprintReadWrite) float SoilCompaction = 0.0f;
     UPROPERTY(BlueprintReadWrite) float SoilStability = 0.0f;
     UPROPERTY(BlueprintReadWrite) float WetlandScore = 0.0f;
-
     UPROPERTY(BlueprintReadWrite) float MagmaPressure = 0.0f;
     UPROPERTY(BlueprintReadWrite) float TectonicStress = 0.0f;
     UPROPERTY(BlueprintReadWrite) float EruptionDaysRemaining = 0.0f;
     UPROPERTY(BlueprintReadWrite) float AshDensity = 0.0f;
     UPROPERTY(BlueprintReadWrite) float AshDensityBuffer = 0.0f;
-
-    UPROPERTY(BlueprintReadWrite) int32 OwnerSettlementID = -1;
-    UPROPERTY(BlueprintReadWrite) int32 OwnerNationID = -1;
-    UPROPERTY(BlueprintReadWrite) FLinearColor PoliticalColor = FLinearColor::Transparent;
-
-    UPROPERTY(BlueprintReadWrite) uint8 TreeSpeciesID = 0;
     UPROPERTY(BlueprintReadWrite) float TreeAge = 0.0f;
 };
 
@@ -333,7 +330,10 @@ USTRUCT(BlueprintType)
 struct FChunkData
 {
     GENERATED_BODY()
-    UPROPERTY() TArray<FCellData> MicroCells;
+    // OPTIMALIZACE 4: Dvì oddìlená pole, Cache locality = King
+    UPROPERTY() TArray<FCellStaticData> StaticCells;
+    UPROPERTY() TArray<FCellDynamicData> DynamicCells;
+
     UPROPERTY() bool bIsSimulatingMicro = false;
     UPROPERTY() double LocalChunkWaterVolume = 0.0;
     UPROPERTY() uint8 VisualDirtyFlags = 0;
@@ -425,7 +425,6 @@ struct FContinentData
     UPROPERTY() FVector2D DriftDirection;
 };
 
-// --- OPTIMALIZACE 2: Datová cache pro terén ---
 USTRUCT()
 struct FPrecomputedTerrain
 {
@@ -478,10 +477,8 @@ struct FChunkGenerationParameters
     TArray<FContinentData> Continents;
     FVector2D PlayerPos2D = FVector2D::ZeroVector;
     bool bUseLOD = true;
-
     EWorldViewMode ViewMode = EWorldViewMode::Normal;
 
-    // OPTIMALIZACE 2: Globální precalculated buffer terénu, aby se šum nepoèítal 2x
     TSharedPtr<TArray<FPrecomputedTerrain>> GlobalTerrainCache;
     int32 TotalWorldCellsX = 0;
     int32 TotalWorldCellsY = 0;
@@ -703,7 +700,6 @@ struct FAnimalData
     UPROPERTY(BlueprintReadWrite) float Hunger = 0.0f;
     UPROPERTY(BlueprintReadWrite) float Age = 0.0f;
     UPROPERTY(BlueprintReadWrite) float HerdSize = 15.0f;
-
     UPROPERTY(BlueprintReadWrite) float Condition = 1.0f;
 };
 

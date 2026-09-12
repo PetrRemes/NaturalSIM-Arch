@@ -41,11 +41,11 @@ void USettlementSystem::RecalculatePoliticalColors(ASimWorldManager* Manager) {
     for (FSettlementData& S : Settlements) {
         FLinearColor NewColor = GetPoliticalColor(S);
         for (FIntPoint Coord : S.ClaimedCells) {
-            FCellData* C = nullptr; FIntPoint CC;
-            if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, C, CC)) {
-                if (C->PoliticalColor != NewColor || C->OwnerNationID != S.NationID) {
-                    C->PoliticalColor = NewColor;
-                    C->OwnerNationID = S.NationID;
+            FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint CC;
+            if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, SCell, DCell, CC)) {
+                if (SCell->PoliticalColor != NewColor || SCell->OwnerNationID != S.NationID) {
+                    SCell->PoliticalColor = NewColor;
+                    SCell->OwnerNationID = S.NationID;
                     Manager->RegisterVisualChange(CC, EChunkVisualDirty::Terrain);
                 }
             }
@@ -209,8 +209,8 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
         FIntPoint LastChunkCoord(-9999, -9999);
         const FChunkData* LastChunk = nullptr;
 
-        auto GetFastCell = [&](int32 GX, int32 GY) -> const FCellData* {
-            if (GX < 0 || GY < 0) return nullptr;
+        auto GetFastCell = [&](int32 GX, int32 GY, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) -> bool {
+            if (GX < 0 || GY < 0) return false;
             int32 CX = GX / (Manager->ChunkSize - 1);
             int32 CY = GY / (Manager->ChunkSize - 1);
             FIntPoint CCoord(CX, CY);
@@ -222,9 +222,12 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
             if (LastChunk) {
                 int32 LX = GX % (Manager->ChunkSize - 1);
                 int32 LY = GY % (Manager->ChunkSize - 1);
-                return &LastChunk->MicroCells[LX + LY * Manager->ChunkSize];
+                int32 Idx = LX + LY * Manager->ChunkSize;
+                OutS = &LastChunk->StaticCells[Idx];
+                OutD = &LastChunk->DynamicCells[Idx];
+                return true;
             }
-            return nullptr;
+            return false;
             };
 
         float CurrentTools = LocalCity.Inventory.Tools;
@@ -235,28 +238,28 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
 
         float BaseFarmYield = bHasIrrigation ? 120.0f : 50.0f;
         float CenterElevation = 0.0f;
-        const FCellData* CenterCell = GetFastCell(GlobalCX, GlobalCY);
-        if (CenterCell) CenterElevation = CenterCell->Elevation;
+        const FCellStaticData* CenterSCell = nullptr; const FCellDynamicData* CenterDCell = nullptr;
+        if (GetFastCell(GlobalCX, GlobalCY, CenterSCell, CenterDCell)) CenterElevation = CenterSCell->Elevation;
 
         for (FIntPoint Coord : LocalCity.ClaimedCells) {
-            const FCellData* Cell = GetFastCell(Coord.X, Coord.Y);
-            if (!Cell) continue;
+            const FCellStaticData* SCell = nullptr; const FCellDynamicData* DCell = nullptr;
+            if (!GetFastCell(Coord.X, Coord.Y, SCell, DCell)) continue;
 
-            Work.ScannedFloraCap += Cell->FloraDensity * 10.0f + Cell->BerryBushes;
-            Work.ScannedWoodCap += Cell->WoodAmount;
-            if (Cell->SurfaceWater > 0.0f || Cell->RiverDischarge > 10.0f) Work.ScannedWaterCap += 10.0f;
-            if (Cell->Bedrock == EBedrockType::Rock) Work.ScannedStoneCap += 10.0f;
+            Work.ScannedFloraCap += DCell->FloraDensity * 10.0f + DCell->BerryBushes;
+            Work.ScannedWoodCap += DCell->WoodAmount;
+            if (DCell->SurfaceWater > 0.0f || DCell->RiverDischarge > 10.0f) Work.ScannedWaterCap += 10.0f;
+            if (SCell->Bedrock == EBedrockType::Rock) Work.ScannedStoneCap += 10.0f;
 
-            if (Cell->bIsVolcano || Cell->Lava > 0.1f) Work.bNearVolcano = true;
+            if (SCell->bIsVolcano || DCell->Lava > 0.1f) Work.bNearVolcano = true;
 
             FCellDelta Delta;
             Delta.GlobalX = Coord.X; Delta.GlobalY = Coord.Y;
 
-            if (Cell->SurfaceWater > (Cell->ChannelDepth + Cell->BankHeight + 0.5f)) {
-                if (Cell->HouseDensity > 0.0f) {
-                    Delta.HouseDensityDelta = -Cell->HouseDensity * 0.5f;
+            if (DCell->SurfaceWater > (SCell->ChannelDepth + SCell->BankHeight + 0.5f)) {
+                if (DCell->HouseDensity > 0.0f) {
+                    Delta.HouseDensityDelta = -DCell->HouseDensity * 0.5f;
                 }
-                if (Cell->BuildingType != EBuildingType::None && Cell->BuildingType != EBuildingType::Port) {
+                if (SCell->BuildingType != EBuildingType::None && SCell->BuildingType != EBuildingType::Port) {
                     if (FMath::FRand() < 0.2f * DeltaTime) {
                         Delta.NewBuilding = EBuildingType::None;
                         Delta.bSetBuilding = true;
@@ -264,128 +267,130 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
                 }
             }
             else {
-                if (HousesPlaced < BuiltHouses && Cell->SurfaceWater < 1.0f && Cell->Elevation > Manager->SeaLevel && Cell->BuildingType == EBuildingType::None) {
-                    if (Cell->HouseDensity < 1.0f) Delta.HouseDensityDelta += 0.2f * DeltaTime;
-                    if (Cell->TreeType != ETreeType::None) Delta.bClearTree = true;
+                if (HousesPlaced < BuiltHouses && DCell->SurfaceWater < 1.0f && SCell->Elevation > Manager->SeaLevel && SCell->BuildingType == EBuildingType::None) {
+                    if (DCell->HouseDensity < 1.0f) Delta.HouseDensityDelta += 0.2f * DeltaTime;
+                    if (SCell->TreeType != ETreeType::None) Delta.bClearTree = true;
                     HousesPlaced++;
                 }
             }
 
-            if (Cell->BuildingType == EBuildingType::Farm) {
+            if (SCell->BuildingType == EBuildingType::Farm) {
                 Work.NumFarms++;
                 if (bCanEco) {
                     Delta.NewBuilding = EBuildingType::EcoFarm; Delta.bSetBuilding = true;
                 }
                 else {
                     float ActualYield = BaseFarmYield;
-                    if (bHasIrrigation && Cell->GroundWater < 50.0f && Cell->SurfaceWater < 0.1f) ActualYield = 40.0f;
-                    float Yield = ActualYield * ToolBonus * FMath::Max(0.0f, 1.0f - Cell->WaterPollution) * DeltaTime;
+                    if (bHasIrrigation && DCell->GroundWater < 50.0f && DCell->SurfaceWater < 0.1f) ActualYield = 40.0f;
+                    float Yield = ActualYield * ToolBonus * FMath::Max(0.0f, 1.0f - DCell->WaterPollution) * DeltaTime;
                     Delta.FloraGatherAttempt += Yield;
                     Delta.WaterPollutionDelta += 0.005f * DeltaTime;
                 }
             }
-            else if (Cell->BuildingType == EBuildingType::EcoFarm) {
+            else if (SCell->BuildingType == EBuildingType::EcoFarm) {
                 Work.NumEcoFarms++;
                 float Yield = 250.0f * ToolBonus * DeltaTime;
                 Delta.FloraGatherAttempt += Yield;
                 Delta.WaterPollutionDelta -= 0.01f * DeltaTime;
             }
-            else if (Cell->BuildingType == EBuildingType::LumberCamp) {
+            else if (SCell->BuildingType == EBuildingType::LumberCamp) {
                 Work.NumLumberCamps++;
                 if (bCanEco) {
                     Delta.NewBuilding = EBuildingType::ForestryCenter; Delta.bSetBuilding = true;
                 }
                 else {
-                    float Yield = FMath::Min(Cell->WoodAmount, 100.0f * ToolBonus * DeltaTime);
+                    float Yield = FMath::Min(DCell->WoodAmount, 100.0f * ToolBonus * DeltaTime);
                     Delta.WoodGatherAttempt += Yield;
                 }
             }
-            else if (Cell->BuildingType == EBuildingType::ForestryCenter) {
+            else if (SCell->BuildingType == EBuildingType::ForestryCenter) {
                 Work.NumForestryCenters++;
                 float Yield = 80.0f * ToolBonus * DeltaTime;
                 Delta.WoodGatherAttempt += Yield * 0.1f;
             }
-            else if (Cell->BuildingType == EBuildingType::Mine) {
+            else if (SCell->BuildingType == EBuildingType::Mine) {
                 Work.NumMines++;
                 Delta.DangerLevelDelta += 0.05f * DeltaTime;
                 Delta.WaterPollutionDelta += 0.15f * DeltaTime;
             }
-            else if (Cell->BuildingType == EBuildingType::Blacksmith) {
+            else if (SCell->BuildingType == EBuildingType::Blacksmith) {
                 Work.NumBlacksmiths++;
                 Delta.WaterPollutionDelta += 0.15f * DeltaTime;
                 Delta.AshDensityDelta += 1.0f * DeltaTime;
             }
-            else if (Cell->BuildingType == EBuildingType::Market) {
+            else if (SCell->BuildingType == EBuildingType::Market) {
                 Work.NumMarkets++;
             }
-            else if (Cell->BuildingType == EBuildingType::LogisticsCenter) {
+            else if (SCell->BuildingType == EBuildingType::LogisticsCenter) {
                 Work.NumLogisticsCenters++;
             }
-            else if (Cell->BuildingType == EBuildingType::Castle) {
+            else if (SCell->BuildingType == EBuildingType::Castle) {
                 Work.NumCastles++;
             }
-            else if (Cell->BuildingType == EBuildingType::Port) {
+            else if (SCell->BuildingType == EBuildingType::Port) {
                 Work.NumPorts++;
                 Delta.WaterPollutionDelta += 0.1f * DeltaTime;
                 Delta.FloraGatherAttempt += 150.0f * ToolBonus * DeltaTime;
             }
-            else if (Cell->BuildingType == EBuildingType::Factory) {
+            else if (SCell->BuildingType == EBuildingType::Factory) {
                 Work.NumFactories++;
             }
-            else if (Cell->BuildingType == EBuildingType::PowerPlant_Coal) {
+            else if (SCell->BuildingType == EBuildingType::PowerPlant_Coal) {
                 Work.NumPowerPlantsCoal++;
                 Delta.WaterPollutionDelta += 0.3f * DeltaTime;
                 Delta.AshDensityDelta += 3.5f * DeltaTime;
             }
-            else if (Cell->BuildingType == EBuildingType::PowerPlant_Nuclear) {
+            else if (SCell->BuildingType == EBuildingType::PowerPlant_Nuclear) {
                 Work.NumPowerPlantsNuke++;
                 Delta.DangerLevelDelta += 0.02f * DeltaTime;
             }
-            else if (Cell->BuildingType == EBuildingType::Airport) {
+            else if (SCell->BuildingType == EBuildingType::Airport) {
                 Work.NumAirports++;
                 Delta.AshDensityDelta += 0.5f * DeltaTime;
             }
-            else if (Cell->BuildingType == EBuildingType::AICenter) {
+            else if (SCell->BuildingType == EBuildingType::AICenter) {
                 Work.NumAICenters++;
             }
-            else if (Cell->BuildingType == EBuildingType::OilRig) {
+            else if (SCell->BuildingType == EBuildingType::OilRig) {
                 Work.NumOilRigs++;
                 Delta.WaterPollutionDelta += 0.2f * DeltaTime;
             }
-            else if (Cell->HouseDensity == 0.0f && Cell->BuildingType == EBuildingType::None) {
-                if (Cell->SurfaceWater < 0.1f) {
-                    if (Cell->Elevation < Manager->SeaLevel + 400.0f) {
+            else if (DCell->HouseDensity == 0.0f && SCell->BuildingType == EBuildingType::None) {
+                if (DCell->SurfaceWater < 0.1f) {
+                    if (SCell->Elevation < Manager->SeaLevel + 400.0f) {
                         PotentialFarms.Add(Coord);
                         if (bCanSmelt) PotentialBlacksmiths.Add(Coord);
                         if (bCanTrade) PotentialMarkets.Add(Coord);
-                        if (bCanIndustry && Cell->Elevation > Manager->SeaLevel + 15.0f) PotentialFactories.Add(Coord);
+                        if (bCanIndustry && SCell->Elevation > Manager->SeaLevel + 15.0f) PotentialFactories.Add(Coord);
 
-                        if (bCanFly && FMath::Abs(Cell->Elevation - CenterElevation) < 5.0f) PotentialAirports.Add(Coord);
+                        if (bCanFly && FMath::Abs(SCell->Elevation - CenterElevation) < 5.0f) PotentialAirports.Add(Coord);
                     }
 
-                    if (Cell->TreeType != ETreeType::None && Cell->WoodAmount > 50.0f) PotentialLumberCamps.Add(Coord);
-                    if (Cell->Bedrock == EBedrockType::Rock || Cell->Elevation > Manager->SeaLevel + 500.0f) PotentialMines.Add(Coord);
-                    if (bCanDefend && Cell->Elevation > CenterElevation + 20.0f) PotentialCastles.Add(Coord);
+                    if (SCell->TreeType != ETreeType::None && DCell->WoodAmount > 50.0f) PotentialLumberCamps.Add(Coord);
+                    if (SCell->Bedrock == EBedrockType::Rock || SCell->Elevation > Manager->SeaLevel + 500.0f) PotentialMines.Add(Coord);
+                    if (bCanDefend && SCell->Elevation > CenterElevation + 20.0f) PotentialCastles.Add(Coord);
                 }
 
-                if (Cell->Elevation < Manager->SeaLevel + 15.0f && Cell->SurfaceWater < 0.1f) {
+                if (SCell->Elevation < Manager->SeaLevel + 15.0f && DCell->SurfaceWater < 0.1f) {
                     for (int n = 0; n < 4; n++) {
                         int32 Offsets[4][2] = { {0,1}, {1,0}, {0,-1}, {-1,0} };
-                        const FCellData* NC = GetFastCell(Coord.X + Offsets[n][0], Coord.Y + Offsets[n][1]);
-                        if (NC && (NC->Elevation <= Manager->SeaLevel || NC->SurfaceWater > 0.5f)) {
-                            if (bCanSail) PotentialPorts.Add(Coord);
-                            if (bCanNuke) PotentialNuclear.Add(Coord);
-                            break;
+                        const FCellStaticData* NC_S = nullptr; const FCellDynamicData* NC_D = nullptr;
+                        if (GetFastCell(Coord.X + Offsets[n][0], Coord.Y + Offsets[n][1], NC_S, NC_D)) {
+                            if (NC_S->Elevation <= Manager->SeaLevel || NC_D->SurfaceWater > 0.5f) {
+                                if (bCanSail) PotentialPorts.Add(Coord);
+                                if (bCanNuke) PotentialNuclear.Add(Coord);
+                                break;
+                            }
                         }
                     }
                 }
 
-                if (bCanExtractOil && (Cell->Biome == EBiomeType::Desert || Cell->WaterType == EWaterType::Ocean)) {
+                if (bCanExtractOil && (SCell->Biome == EBiomeType::Desert || SCell->WaterType == EWaterType::Ocean)) {
                     PotentialOilRigs.Add(Coord);
                 }
 
-                if (Cell->BerryBushes > 0.0f && Cell->SurfaceWater < 0.1f) {
-                    float Pick = FMath::Min(Cell->BerryBushes, 5.0f * DeltaTime);
+                if (DCell->BerryBushes > 0.0f && DCell->SurfaceWater < 0.1f) {
+                    float Pick = FMath::Min(DCell->BerryBushes, 5.0f * DeltaTime);
                     Delta.FloraGatherAttempt += Pick;
                 }
             }
@@ -395,7 +400,6 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
             }
         }
 
-        // F¡ZE 4: A* Pathfinding pro lok·lnÌ silniËnÌ sÌù osady namÌsto greedy algoritmu
         auto BuildOrganicRoad = [&](FIntPoint Target) {
             TMap<FIntPoint, FIntPoint> CameFrom;
             TMap<FIntPoint, float> GScore;
@@ -421,11 +425,10 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
                 FIntPoint Curr = OpenSet[BestIdx];
                 OpenSet.RemoveAtSwap(BestIdx);
 
-                const FCellData* CCell = GetFastCell(Curr.X, Curr.Y);
-                if (!CCell) continue;
+                const FCellStaticData* CCellS = nullptr; const FCellDynamicData* CCellD = nullptr;
+                if (!GetFastCell(Curr.X, Curr.Y, CCellS, CCellD)) continue;
 
-                // Jakmile narazÌme na centrum nebo na Ué EXISTUJÕCÕ CESTU, napojÌme se a konËÌme (û·dnÈ cesty p¯es celou mapu)
-                if (Curr == EndPos || (CCell->bHasRoad && Curr != Target)) {
+                if (Curr == EndPos || (CCellS->bHasRoad && Curr != Target)) {
                     bFound = true;
                     LastNode = Curr;
                     break;
@@ -434,21 +437,21 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
                 FIntPoint Offsets[8] = { {1,0}, {0,1}, {-1,0}, {0,-1}, {1,1}, {-1,1}, {-1,-1}, {1,-1} };
                 for (int i = 0; i < 8; i++) {
                     FIntPoint N = Curr + Offsets[i];
-                    const FCellData* NC = GetFastCell(N.X, N.Y);
+                    const FCellStaticData* NCS = nullptr; const FCellDynamicData* NCD = nullptr;
+                    if (!GetFastCell(N.X, N.Y, NCS, NCD)) continue;
 
-                    if (!NC || NC->SurfaceWater >= 0.5f || NC->Elevation <= Manager->SeaLevel) continue;
+                    if (NCD->SurfaceWater >= 0.5f || NCS->Elevation <= Manager->SeaLevel) continue;
 
                     float MoveCost = (i < 4) ? 1.0f : 1.414f;
-                    float ElevDiff = FMath::Abs(NC->Elevation - CCell->Elevation);
-                    if (ElevDiff > 8.0f) continue; // Nep¯ekonatelnÈ sr·zy
+                    float ElevDiff = FMath::Abs(NCS->Elevation - CCellS->Elevation);
+                    if (ElevDiff > 8.0f) continue;
 
                     float TerrainCost = MoveCost * 10.0f;
                     TerrainCost += ElevDiff * 5.0f;
-                    if (NC->TreeType != ETreeType::None) TerrainCost += 2.0f;
-                    if (NC->Biome == EBiomeType::Swamp) TerrainCost += 20.0f;
+                    if (NCS->TreeType != ETreeType::None) TerrainCost += 2.0f;
+                    if (NCS->Biome == EBiomeType::Swamp) TerrainCost += 20.0f;
 
-                    // F¡ZE 4: EnormnÌ preference napojit se na existujÌcÌ uzel sÌtÏ
-                    if (NC->bHasRoad) TerrainCost *= 0.1f;
+                    if (NCS->bHasRoad) TerrainCost *= 0.1f;
 
                     float TentativeG = GScore[Curr] + TerrainCost;
                     if (!GScore.Contains(N) || TentativeG < GScore[N]) {
@@ -462,8 +465,8 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
             FIntPoint PathCurr = LastNode;
             while (CameFrom.Contains(PathCurr)) {
                 if (PathCurr != EndPos && PathCurr != Target) {
-                    const FCellData* PathCell = GetFastCell(PathCurr.X, PathCurr.Y);
-                    if (PathCell && !PathCell->bHasRoad) {
+                    const FCellStaticData* PathCellS = nullptr; const FCellDynamicData* PathCellD = nullptr;
+                    if (GetFastCell(PathCurr.X, PathCurr.Y, PathCellS, PathCellD) && !PathCellS->bHasRoad) {
                         Work.NewRoads.AddUnique(PathCurr);
                     }
                 }
@@ -618,34 +621,34 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
         int32 BuildingsDestroyedByFlood = 0;
 
         for (const FCellDelta& CD : Work.CellDeltas) {
-            FCellData* TargetCell = nullptr; FIntPoint ChunkC;
-            if (Manager->GetMutableCellGlobal(CD.GlobalX, CD.GlobalY, TargetCell, ChunkC)) {
+            FCellStaticData* TargetSCell = nullptr; FCellDynamicData* TargetDCell = nullptr; FIntPoint ChunkC;
+            if (Manager->GetMutableCellGlobal(CD.GlobalX, CD.GlobalY, TargetSCell, TargetDCell, ChunkC)) {
 
-                TargetCell->WaterPollution = FMath::Clamp(TargetCell->WaterPollution + CD.WaterPollutionDelta, 0.0f, 1.0f);
-                TargetCell->DangerLevel = FMath::Clamp(TargetCell->DangerLevel + CD.DangerLevelDelta, 0.0f, 1.0f);
+                TargetDCell->WaterPollution = FMath::Clamp(TargetDCell->WaterPollution + CD.WaterPollutionDelta, 0.0f, 1.0f);
+                TargetDCell->DangerLevel = FMath::Clamp(TargetDCell->DangerLevel + CD.DangerLevelDelta, 0.0f, 1.0f);
                 DayPollution += CD.WaterPollutionDelta + CD.AshDensityDelta;
 
                 if (CD.AshDensityDelta > 0.0f) {
-                    TargetCell->AshDensityBuffer += CD.AshDensityDelta;
+                    TargetDCell->AshDensityBuffer += CD.AshDensityDelta;
                     Manager->RegisterVisualChange(ChunkC, EChunkVisualDirty::Cloud);
                 }
 
                 if (CD.HouseDensityDelta != 0.0f) {
-                    TargetCell->HouseDensity = FMath::Clamp(TargetCell->HouseDensity + CD.HouseDensityDelta, 0.0f, 1.0f);
+                    TargetDCell->HouseDensity = FMath::Clamp(TargetDCell->HouseDensity + CD.HouseDensityDelta, 0.0f, 1.0f);
                     Manager->RegisterVisualChange(ChunkC, EChunkVisualDirty::Terrain);
                     bMadeBuildingChange = true;
                     if (CD.HouseDensityDelta < 0.0f) BuildingsDestroyedByFlood++;
                 }
 
                 if (CD.bSetBuilding) {
-                    TargetCell->BuildingType = CD.NewBuilding;
+                    TargetSCell->BuildingType = CD.NewBuilding;
                     if (CD.NewBuilding == EBuildingType::Farm || CD.NewBuilding == EBuildingType::Blacksmith || CD.NewBuilding == EBuildingType::Market ||
                         CD.NewBuilding == EBuildingType::Factory || CD.NewBuilding == EBuildingType::PowerPlant_Coal || CD.NewBuilding == EBuildingType::Airport ||
                         CD.NewBuilding == EBuildingType::Castle || CD.NewBuilding == EBuildingType::PowerPlant_Nuclear || CD.NewBuilding == EBuildingType::AICenter ||
                         CD.NewBuilding == EBuildingType::OilRig || CD.NewBuilding == EBuildingType::LogisticsCenter) {
-                        TargetCell->TreeType = ETreeType::None;
-                        TargetCell->WoodAmount = 0.0f;
-                        TargetCell->FloraDensity = 0.0f;
+                        TargetSCell->TreeType = ETreeType::None;
+                        TargetDCell->WoodAmount = 0.0f;
+                        TargetDCell->FloraDensity = 0.0f;
                     }
                     if (CD.NewBuilding == EBuildingType::None) BuildingsDestroyedByFlood++;
                     Manager->RegisterVisualChange(ChunkC, EChunkVisualDirty::Terrain | EChunkVisualDirty::Flora);
@@ -653,42 +656,42 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
                 }
 
                 if (CD.WoodGatherAttempt > 0.0f) {
-                    float EfficentChop = FMath::Min(TargetCell->WoodAmount, CD.WoodGatherAttempt);
+                    float EfficentChop = FMath::Min(TargetDCell->WoodAmount, CD.WoodGatherAttempt);
                     if (EfficentChop > 0.0f) {
-                        TargetCell->WoodAmount -= EfficentChop;
+                        TargetDCell->WoodAmount -= EfficentChop;
                         ActualWoodGained += EfficentChop * 0.8f;
-                        if (TargetCell->WoodAmount <= 0.0f) TargetCell->TreeType = ETreeType::None;
+                        if (TargetDCell->WoodAmount <= 0.0f) TargetSCell->TreeType = ETreeType::None;
                         Manager->RegisterVisualChange(ChunkC, EChunkVisualDirty::Flora);
                     }
                 }
 
-                if (TargetCell->BuildingType == EBuildingType::Mine) {
+                if (TargetSCell->BuildingType == EBuildingType::Mine) {
                     float Yield = 50.0f * ToolBonus * DeltaTime;
                     ActualStoneGained += Yield;
                     ActualOreGained += Yield * 0.4f;
 
-                    if (TargetCell->Elevation > Manager->SeaLevel + 1500.0f) {
+                    if (TargetSCell->Elevation > Manager->SeaLevel + 1500.0f) {
                         ActualUraniumGained += 5.0f * ToolBonus * DeltaTime;
                     }
                 }
 
-                if (TargetCell->BuildingType == EBuildingType::OilRig) {
+                if (TargetSCell->BuildingType == EBuildingType::OilRig) {
                     ActualOilGained += 150.0f * ToolBonus * DeltaTime;
                 }
 
-                if (CD.bClearTree && TargetCell->TreeType != ETreeType::None) {
-                    ActualWoodGained += TargetCell->WoodAmount * 0.8f;
-                    TargetCell->TreeType = ETreeType::None; TargetCell->FloraDensity *= 0.2f; TargetCell->WoodAmount = 0.0f;
+                if (CD.bClearTree && TargetSCell->TreeType != ETreeType::None) {
+                    ActualWoodGained += TargetDCell->WoodAmount * 0.8f;
+                    TargetSCell->TreeType = ETreeType::None; TargetDCell->FloraDensity *= 0.2f; TargetDCell->WoodAmount = 0.0f;
                     Manager->RegisterVisualChange(ChunkC, EChunkVisualDirty::Flora);
                 }
 
                 if (CD.FloraGatherAttempt > 0.0f) {
-                    if (TargetCell->BuildingType == EBuildingType::Farm || TargetCell->BuildingType == EBuildingType::EcoFarm || TargetCell->BuildingType == EBuildingType::Port) {
+                    if (TargetSCell->BuildingType == EBuildingType::Farm || TargetSCell->BuildingType == EBuildingType::EcoFarm || TargetSCell->BuildingType == EBuildingType::Port) {
                         ActualFloraGained += CD.FloraGatherAttempt;
                     }
-                    else if (TargetCell->BerryBushes > 0.0f) {
-                        float Pick = FMath::Min(TargetCell->BerryBushes, CD.FloraGatherAttempt);
-                        TargetCell->BerryBushes -= Pick; ActualFloraGained += Pick * 2.0f;
+                    else if (TargetDCell->BerryBushes > 0.0f) {
+                        float Pick = FMath::Min(TargetDCell->BerryBushes, CD.FloraGatherAttempt);
+                        TargetDCell->BerryBushes -= Pick; ActualFloraGained += Pick * 2.0f;
                     }
                 }
 
@@ -705,11 +708,11 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
         }
 
         for (FIntPoint RCoord : Work.NewRoads) {
-            FCellData* RCell = nullptr; FIntPoint RCC;
-            if (Manager->GetMutableCellGlobal(RCoord.X, RCoord.Y, RCell, RCC)) {
-                if (RCell->OwnerSettlementID == City.SettlementID && !RCell->bHasRoad && RCell->SurfaceWater < 0.5f) {
-                    RCell->bHasRoad = true;
-                    if (RCell->TreeType != ETreeType::None) { RCell->TreeType = ETreeType::None; RCell->WoodAmount = 0.0f; }
+            FCellStaticData* RCellS = nullptr; FCellDynamicData* RCellD = nullptr; FIntPoint RCC;
+            if (Manager->GetMutableCellGlobal(RCoord.X, RCoord.Y, RCellS, RCellD, RCC)) {
+                if (RCellS->OwnerSettlementID == City.SettlementID && !RCellS->bHasRoad && RCellD->SurfaceWater < 0.5f) {
+                    RCellS->bHasRoad = true;
+                    if (RCellS->TreeType != ETreeType::None) { RCellS->TreeType = ETreeType::None; RCellD->WoodAmount = 0.0f; }
                     Manager->RegisterVisualChange(RCC, EChunkVisualDirty::Terrain | EChunkVisualDirty::Flora);
                 }
             }
@@ -727,9 +730,9 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
 
                     int32 AnimGX = FMath::FloorToInt(Animal.Position.X / CellSize);
                     int32 AnimGY = FMath::FloorToInt(Animal.Position.Y / CellSize);
-                    FCellData* AnimCell = nullptr; FIntPoint AnimCoord;
-                    if (Manager->GetMutableCellGlobal(AnimGX, AnimGY, AnimCell, AnimCoord)) {
-                        AnimCell->AnimalBones += ActualReduce * 5.0f;
+                    FCellStaticData* AnimSCell = nullptr; FCellDynamicData* AnimDCell = nullptr; FIntPoint AnimCoord;
+                    if (Manager->GetMutableCellGlobal(AnimGX, AnimGY, AnimSCell, AnimDCell, AnimCoord)) {
+                        AnimDCell->AnimalBones += ActualReduce * 5.0f;
                         Manager->RegisterVisualChange(AnimCoord, EChunkVisualDirty::Flora);
                     }
                 }
@@ -858,9 +861,9 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
 
         if (S.ClaimedCells.Num() == 0) {
             int32 GX = FMath::FloorToInt(S.Position.X / CellSize); int32 GY = FMath::FloorToInt(S.Position.Y / CellSize);
-            FCellData* C = nullptr; FIntPoint CC;
-            if (Manager->GetMutableCellGlobal(GX, GY, C, CC)) {
-                C->OwnerSettlementID = S.SettlementID; C->OwnerNationID = S.NationID; C->PoliticalColor = GetPoliticalColor(S);
+            FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint CC;
+            if (Manager->GetMutableCellGlobal(GX, GY, SCell, DCell, CC)) {
+                SCell->OwnerSettlementID = S.SettlementID; SCell->OwnerNationID = S.NationID; SCell->PoliticalColor = GetPoliticalColor(S);
                 S.ClaimedCells.Add(FIntPoint(GX, GY));
                 S.BorderCells.Add(FIntPoint(GX + 1, GY)); S.BorderCells.Add(FIntPoint(GX - 1, GY));
                 S.BorderCells.Add(FIntPoint(GX, GY + 1)); S.BorderCells.Add(FIntPoint(GX, GY - 1));
@@ -879,21 +882,21 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
             int32 RndIdx = FMath::RandRange(0, S.BorderCells.Num() - 1);
             FIntPoint Target = S.BorderCells[RndIdx]; S.BorderCells.RemoveAtSwap(RndIdx);
 
-            FCellData* C = nullptr; FIntPoint CC;
-            if (Manager->GetMutableCellGlobal(Target.X, Target.Y, C, CC)) {
+            FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint CC;
+            if (Manager->GetMutableCellGlobal(Target.X, Target.Y, SCell, DCell, CC)) {
 
-                bool bIsValidLand = C->Elevation > Manager->SeaLevel;
-                bool bIsValidSea = bCanSail && C->Elevation <= Manager->SeaLevel && C->Elevation > Manager->SeaLevel - 100.0f;
+                bool bIsValidLand = SCell->Elevation > Manager->SeaLevel;
+                bool bIsValidSea = bCanSail && SCell->Elevation <= Manager->SeaLevel && SCell->Elevation > Manager->SeaLevel - 100.0f;
 
-                if (C->OwnerSettlementID == -1 && (bIsValidLand || bIsValidSea)) {
+                if (SCell->OwnerSettlementID == -1 && (bIsValidLand || bIsValidSea)) {
                     float Cost = 15.0f;
-                    if (C->Elevation > Manager->SeaLevel + 400.0f) Cost += 50.0f;
-                    if (C->TreeType != ETreeType::None) Cost += 10.0f;
+                    if (SCell->Elevation > Manager->SeaLevel + 400.0f) Cost += 50.0f;
+                    if (SCell->TreeType != ETreeType::None) Cost += 10.0f;
                     if (!bIsValidLand) Cost += 150.0f;
 
                     if (S.ExpansionPoints >= Cost) {
                         S.ExpansionPoints -= Cost;
-                        C->OwnerSettlementID = S.SettlementID; C->OwnerNationID = S.NationID; C->PoliticalColor = GetPoliticalColor(S);
+                        SCell->OwnerSettlementID = S.SettlementID; SCell->OwnerNationID = S.NationID; SCell->PoliticalColor = GetPoliticalColor(S);
                         S.ClaimedCells.Add(Target);
 
                         S.BorderCells.AddUnique(FIntPoint(Target.X + 1, Target.Y)); S.BorderCells.AddUnique(FIntPoint(Target.X - 1, Target.Y));
@@ -982,9 +985,9 @@ void USettlementSystem::ProcessDailyDemographics(ASimWorldManager* Manager) {
                     Manager->HumanModule->Tribes.Add(Refugees);
                 }
                 for (FIntPoint Coord : City.ClaimedCells) {
-                    FCellData* C = nullptr; FIntPoint CC;
-                    if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, C, CC)) {
-                        C->OwnerSettlementID = -1; C->OwnerNationID = -1; C->PoliticalColor = FLinearColor::Transparent; C->BuildingType = EBuildingType::None; C->bHasRoad = false;
+                    FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint CC;
+                    if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, SCell, DCell, CC)) {
+                        SCell->OwnerSettlementID = -1; SCell->OwnerNationID = -1; SCell->PoliticalColor = FLinearColor::Transparent; SCell->BuildingType = EBuildingType::None; SCell->bHasRoad = false;
                         Manager->RegisterVisualChange(CC, EChunkVisualDirty::Terrain);
                     }
                 }
@@ -1093,19 +1096,22 @@ void USettlementSystem::BuildSettlementMesh(TSharedPtr<FChunkMeshData> MeshData,
     for (int32 Y = 0; Y < ChunkSize; Y++) {
         for (int32 X = 0; X < ChunkSize; X++) {
             int32 Idx = X + Y * ChunkSize;
-            const FCellData& Cell = Chunk->MicroCells[Idx];
+            if (Idx >= Chunk->StaticCells.Num()) continue;
 
-            if (Cell.HouseDensity <= 0.0f && Cell.BuildingType == EBuildingType::None) continue;
+            const FCellStaticData& SCell = Chunk->StaticCells[Idx];
+            const FCellDynamicData& DCell = Chunk->DynamicCells[Idx];
+
+            if (DCell.HouseDensity <= 0.0f && SCell.BuildingType == EBuildingType::None) continue;
 
             float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
             float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
-            float Z = Cell.Elevation;
+            float Z = SCell.Elevation;
 
-            FLinearColor BaseColor = Cell.PoliticalColor.A > 0.1f ? Cell.PoliticalColor : FLinearColor(0.8f, 0.8f, 0.8f, 1.0f);
+            FLinearColor BaseColor = SCell.PoliticalColor.A > 0.1f ? SCell.PoliticalColor : FLinearColor(0.8f, 0.8f, 0.8f, 1.0f);
             FRandomStream Stream(Manager->MapSeed + Idx);
 
-            if (Cell.HouseDensity > 0.0f) {
-                int32 NumHouses = FMath::Clamp(FMath::RoundToInt(Cell.HouseDensity * 4.0f), 1, 4);
+            if (DCell.HouseDensity > 0.0f) {
+                int32 NumHouses = FMath::Clamp(FMath::RoundToInt(DCell.HouseDensity * 4.0f), 1, 4);
                 for (int32 h = 0; h < NumHouses; h++) {
                     float HX = LocalX + Stream.FRandRange(-15.0f, 15.0f);
                     float HY = LocalY + Stream.FRandRange(-15.0f, 15.0f);
@@ -1119,10 +1125,10 @@ void USettlementSystem::BuildSettlementMesh(TSharedPtr<FChunkMeshData> MeshData,
             }
 
             FVector C(LocalX, LocalY, Z);
-            switch (Cell.BuildingType) {
+            switch (SCell.BuildingType) {
             case EBuildingType::Farm:
             case EBuildingType::EcoFarm: {
-                FLinearColor FieldColor = (Cell.BuildingType == EBuildingType::EcoFarm) ? FLinearColor(0.1f, 0.8f, 0.2f, 1.0f) : FLinearColor(0.6f, 0.5f, 0.2f, 1.0f);
+                FLinearColor FieldColor = (SCell.BuildingType == EBuildingType::EcoFarm) ? FLinearColor(0.1f, 0.8f, 0.2f, 1.0f) : FLinearColor(0.6f, 0.5f, 0.2f, 1.0f);
                 AddBox(C + FVector(0, 0, 1.0f), FVector(20.0f, 20.0f, 1.0f), FieldColor);
                 break;
             }
@@ -1139,8 +1145,8 @@ void USettlementSystem::BuildSettlementMesh(TSharedPtr<FChunkMeshData> MeshData,
             case EBuildingType::Blacksmith:
             case EBuildingType::Factory:
             case EBuildingType::PowerPlant_Coal: {
-                float Size = (Cell.BuildingType == EBuildingType::Blacksmith) ? 8.0f : 15.0f;
-                float Height = (Cell.BuildingType == EBuildingType::Blacksmith) ? 6.0f : 12.0f;
+                float Size = (SCell.BuildingType == EBuildingType::Blacksmith) ? 8.0f : 15.0f;
+                float Height = (SCell.BuildingType == EBuildingType::Blacksmith) ? 6.0f : 12.0f;
                 FLinearColor Brick = FLinearColor(0.5f, 0.2f, 0.15f, 1.0f);
                 AddBox(C + FVector(0, 0, Height * 0.5f), FVector(Size, Size, Height * 0.5f), Brick);
                 AddBox(C + FVector(Size * 0.5f, Size * 0.5f, Height + 10.0f), FVector(Size * 0.2f, Size * 0.2f, 10.0f), FLinearColor(0.1f, 0.1f, 0.1f, 1.0f));
@@ -1202,7 +1208,6 @@ bool USettlementSystem::TryBoostCulturalPillar(int32 SettlementID, ECulturalPill
     for (FSettlementData& City : Settlements) {
         if (City.SettlementID == SettlementID) {
 
-            // MÏsto je instituce, stojÌ to 100 many (kmen st·l 50)
             if (!Manager->ManaModule->SpendMana(100.0f, TEXT("Inspirace osady"))) return false;
 
             float BoostAmount = 20.0f;
@@ -1212,7 +1217,6 @@ bool USettlementSystem::TryBoostCulturalPillar(int32 SettlementID, ECulturalPill
             ECulturalPillar AllyPillar = Pillar;
             ECulturalPillar OpponentPillar = Pillar;
 
-            // Logika sp¯ÌznÏn˝ch a protich˘dn˝ch pilÌ¯˘
             switch (Pillar) {
             case ECulturalPillar::Ecology: AllyPillar = ECulturalPillar::Spirituality; OpponentPillar = ECulturalPillar::Industry; break;
             case ECulturalPillar::Industry: AllyPillar = ECulturalPillar::Expansion; OpponentPillar = ECulturalPillar::Ecology; break;
@@ -1243,13 +1247,11 @@ bool USettlementSystem::TryForceExpansion(int32 SettlementID, FVector2D TargetLo
     for (FSettlementData& City : Settlements) {
         if (City.SettlementID == SettlementID) {
 
-            // Drah˝ mocensk˝ z·sah
             if (!Manager->ManaModule->SpendMana(250.0f, TEXT("Nucena expanze osady"))) return false;
 
             City.bHasForcedExpansion = true;
             City.ForcedExpansionTarget = TargetLoc;
 
-            // D·me mÏstu masivnÌ injekci expanznÌch bod˘, aby okamûitÏ zaËalo zabÌrat ˙zemÌ
             City.ExpansionPoints += 150.0f;
 
             return true;

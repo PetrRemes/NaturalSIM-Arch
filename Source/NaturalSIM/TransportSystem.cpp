@@ -2,7 +2,7 @@
 #include "SimWorldManager.h"
 #include "SettlementSystem.h"
 #include "NationSystem.h"
-#include "Async/Async.h" // Pøidáno pro asynchronní vlákna (AsyncTask)
+#include "Async/Async.h" 
 
 UTransportSystem::UTransportSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UTransportSystem::BeginPlay() { Super::BeginPlay(); }
@@ -112,8 +112,8 @@ TArray<FVector2D> UTransportSystem::CalculateRoadPath_Async(FVector2D PosA, FVec
         OpenSet.RemoveAtSwap(CurrentIdx);
         ClosedSet.Add(Current);
 
-        FCellData CurrentCell;
-        Manager->GetCellGlobal(Current.X, Current.Y, CurrentCell);
+        FCellStaticData CurrentSCell; FCellDynamicData CurrentDCell;
+        Manager->GetCellGlobal(Current.X, Current.Y, CurrentSCell, CurrentDCell);
 
         FIntPoint Neighbors[8] = {
             FIntPoint(0,1), FIntPoint(1,0), FIntPoint(0,-1), FIntPoint(-1,0),
@@ -125,19 +125,19 @@ TArray<FVector2D> UTransportSystem::CalculateRoadPath_Async(FVector2D PosA, FVec
 
             if (ClosedSet.Contains(Neighbor)) continue;
 
-            FCellData NeighborCell;
-            if (!Manager->GetCellGlobal(Neighbor.X, Neighbor.Y, NeighborCell)) continue;
+            FCellStaticData NSCell; FCellDynamicData NDCell;
+            if (!Manager->GetCellGlobal(Neighbor.X, Neighbor.Y, NSCell, NDCell)) continue;
 
-            if (NeighborCell.SurfaceWater >= 0.2f || NeighborCell.Elevation <= Manager->SeaLevel) continue;
+            if (NDCell.SurfaceWater >= 0.2f || NSCell.Elevation <= Manager->SeaLevel) continue;
 
-            float Slope = FMath::Abs(NeighborCell.Elevation - CurrentCell.Elevation);
+            float Slope = FMath::Abs(NSCell.Elevation - CurrentSCell.Elevation);
             if (Slope > 8.0f) continue;
 
             float MoveCost = (i < 4) ? 1.0f : 1.414f;
             float TerrainCost = MoveCost * 10.0f;
             if (Slope > 2.0f) TerrainCost += Slope * 5.0f;
-            if (NeighborCell.TreeType != ETreeType::None) TerrainCost += 5.0f;
-            if (NeighborCell.Biome == EBiomeType::Swamp) TerrainCost += 50.0f;
+            if (NSCell.TreeType != ETreeType::None) TerrainCost += 5.0f;
+            if (NSCell.Biome == EBiomeType::Swamp) TerrainCost += 50.0f;
 
             float TentativeG = GScore[Current] + TerrainCost;
 
@@ -163,7 +163,7 @@ TArray<FVector2D> UTransportSystem::CalculateRoadPath_Async(FVector2D PosA, FVec
     FIntPoint PathCurr = bFoundPath ? EndCoord : BestReachable;
 
     if (!bFoundPath && FVector2D::Distance(FVector2D(PathCurr), FVector2D(EndCoord)) > 10.0f) {
-        return OutPath; // Vrací prázdné pole, cesta neexistuje
+        return OutPath;
     }
 
     TArray<FVector2D> TempPath;
@@ -240,10 +240,10 @@ TArray<FVector2D> UTransportSystem::CalculateSeaPath_Async(FVector2D PosA, FVect
 
             if (ClosedSet.Contains(Neighbor)) continue;
 
-            FCellData NeighborCell;
-            if (!Manager->GetCellGlobal(Neighbor.X, Neighbor.Y, NeighborCell)) continue;
+            FCellStaticData NSCell; FCellDynamicData NDCell;
+            if (!Manager->GetCellGlobal(Neighbor.X, Neighbor.Y, NSCell, NDCell)) continue;
 
-            if (NeighborCell.Elevation > Manager->SeaLevel && NeighborCell.SurfaceWater < 0.5f) {
+            if (NSCell.Elevation > Manager->SeaLevel && NDCell.SurfaceWater < 0.5f) {
                 if (Neighbor != EndCoord && Neighbor != StartCoord) {
                     continue;
                 }
@@ -437,14 +437,12 @@ void UTransportSystem::ProcessTransport(TArray<FSettlementData>& Settlements, fl
                 TWeakObjectPtr<UTransportSystem> WeakThis(this);
                 TWeakObjectPtr<ASimWorldManager> WeakManager(Manager);
 
-                // ASYNCHRONNÍ VÝPOÈET CESTY
                 AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis, WeakManager, RoadReq, PosA, PosB, CalcKey]() {
                     TArray<FVector2D> PathRes;
                     if (WeakManager.IsValid()) {
                         PathRes = CalculateRoadPath_Async(PosA, PosB, WeakManager.Get());
                     }
 
-                    // NÁVRAT DO HLAVNÍHO VLÁKNA A ZÁPIS
                     AsyncTask(ENamedThreads::GameThread, [WeakThis, RoadReq, PathRes, CalcKey]() {
                         if (WeakThis.IsValid()) {
                             WeakThis->ActiveRoadCalculations.Remove(CalcKey);
@@ -487,13 +485,15 @@ void UTransportSystem::ProcessTransport(TArray<FSettlementData>& Settlements, fl
                         for (int32 dx = -1; dx <= 1; dx++) {
                             int32 nx = LX + dx; int32 ny = LY + dy;
                             if (nx >= 0 && nx < Manager->ChunkSize && ny >= 0 && ny < Manager->ChunkSize) {
-                                FCellData& Cell = TargetChunk->MicroCells[nx + ny * Manager->ChunkSize];
-                                if (Cell.TreeType != ETreeType::None) {
-                                    Cell.TreeType = ETreeType::None;
-                                    Cell.WoodAmount = 0.0f;
-                                    Cell.FloraDensity *= 0.1f;
+                                FCellStaticData& SCell = TargetChunk->StaticCells[nx + ny * Manager->ChunkSize];
+                                FCellDynamicData& DCell = TargetChunk->DynamicCells[nx + ny * Manager->ChunkSize];
+
+                                if (SCell.TreeType != ETreeType::None) {
+                                    SCell.TreeType = ETreeType::None;
+                                    DCell.WoodAmount = 0.0f;
+                                    DCell.FloraDensity *= 0.1f;
                                 }
-                                if (dx == 0 && dy == 0) Cell.bHasRoad = true;
+                                if (dx == 0 && dy == 0) SCell.bHasRoad = true;
                             }
                         }
                     }
@@ -523,15 +523,17 @@ void UTransportSystem::ProcessTransport(TArray<FSettlementData>& Settlements, fl
             bool bHasPortA = false, bHasPortB = false;
 
             for (FIntPoint C : CityA->ClaimedCells) {
-                FCellData Cell; if (Manager->GetCellGlobal(C.X, C.Y, Cell)) {
-                    if (Cell.BuildingType == EBuildingType::Airport) bHasAirportA = true;
-                    if (Cell.BuildingType == EBuildingType::Port) bHasPortA = true;
+                FCellStaticData SCell; FCellDynamicData DCell;
+                if (Manager->GetCellGlobal(C.X, C.Y, SCell, DCell)) {
+                    if (SCell.BuildingType == EBuildingType::Airport) bHasAirportA = true;
+                    if (SCell.BuildingType == EBuildingType::Port) bHasPortA = true;
                 }
             }
             for (FIntPoint C : CityB->ClaimedCells) {
-                FCellData Cell; if (Manager->GetCellGlobal(C.X, C.Y, Cell)) {
-                    if (Cell.BuildingType == EBuildingType::Airport) bHasAirportB = true;
-                    if (Cell.BuildingType == EBuildingType::Port) bHasPortB = true;
+                FCellStaticData SCell; FCellDynamicData DCell;
+                if (Manager->GetCellGlobal(C.X, C.Y, SCell, DCell)) {
+                    if (SCell.BuildingType == EBuildingType::Airport) bHasAirportB = true;
+                    if (SCell.BuildingType == EBuildingType::Port) bHasPortB = true;
                 }
             }
 
@@ -566,9 +568,6 @@ void UTransportSystem::ProcessTransport(TArray<FSettlementData>& Settlements, fl
             }
 
             float EffectiveSpeed = Route.TransferSpeed * SpeedMultiplier * CompletionRatio * DeltaTime;
-
-            // OPRAVA: Tvrdý strop pro pøevoz! Zabrání kolapsu a ping-pong efektu zásob pøi záseku (lagu). 
-            // Za jeden snímek se smí pøesunout maximálnì 25 % cenového rozdílu trhu.
             EffectiveSpeed = FMath::Min(EffectiveSpeed, 0.25f);
 
             float FloraDiff = CityA->Inventory.FloraFood - CityB->Inventory.FloraFood;
@@ -588,7 +587,7 @@ void UTransportSystem::ProcessTransport(TArray<FSettlementData>& Settlements, fl
             CityA->Inventory.Stone -= StoneTransfer; CityB->Inventory.Stone += StoneTransfer;
 
             float WealthDiff = CityA->Inventory.Wealth - CityB->Inventory.Wealth;
-            float WealthTransfer = WealthDiff * EffectiveSpeed * 2.0f; // Bohatství putuje 2x rychleji
+            float WealthTransfer = WealthDiff * EffectiveSpeed * 2.0f;
             CityA->Inventory.Wealth -= WealthTransfer; CityB->Inventory.Wealth += WealthTransfer;
 
             float OilDiff = CityA->Inventory.Oil - CityB->Inventory.Oil;
@@ -655,10 +654,10 @@ void UTransportSystem::BuildTransportMesh(TSharedPtr<FChunkMeshData> MeshData, c
             int32 CY1 = FMath::FloorToInt(P1.Y / ChunkWorldSize);
 
             if (CX1 == ChunkCoord.X && CY1 == ChunkCoord.Y) {
-                FCellData Cell1, Cell2;
+                FCellStaticData SCell1, SCell2; FCellDynamicData DCell1, DCell2;
                 float Z1 = Manager->SeaLevel + 5.0f; float Z2 = Manager->SeaLevel + 5.0f;
-                if (Manager->GetCellDataAtLocation(FVector(P1.X, P1.Y, 0), Cell1)) Z1 = Cell1.Elevation + 2.0f;
-                if (Manager->GetCellDataAtLocation(FVector(P2.X, P2.Y, 0), Cell2)) Z2 = Cell2.Elevation + 2.0f;
+                if (Manager->GetCellDataAtLocation(FVector(P1.X, P1.Y, 0), SCell1, DCell1)) Z1 = SCell1.Elevation + 2.0f;
+                if (Manager->GetCellDataAtLocation(FVector(P2.X, P2.Y, 0), SCell2, DCell2)) Z2 = SCell2.Elevation + 2.0f;
 
                 FVector2D Dir = (P2 - P1).GetSafeNormal();
                 FVector2D Right(-Dir.Y, Dir.X);
@@ -687,7 +686,8 @@ void UTransportSystem::BuildTransportMesh(TSharedPtr<FChunkMeshData> MeshData, c
             float Z = Manager->SeaLevel;
 
             if (V.Type == EVehicleType::Caravan) {
-                FCellData C; if (Manager->GetCellDataAtLocation(FVector(V.Position.X, V.Position.Y, 0), C)) Z = C.Elevation;
+                FCellStaticData SC; FCellDynamicData DC;
+                if (Manager->GetCellDataAtLocation(FVector(V.Position.X, V.Position.Y, 0), SC, DC)) Z = SC.Elevation;
                 AddBox(FVector(V.Position.X, V.Position.Y, Z + 5.0f), FVector(4.0f, 4.0f, 5.0f), FLinearColor(0.6f, 0.4f, 0.2f, 1.0f));
             }
             else if (V.Type == EVehicleType::Ship) {

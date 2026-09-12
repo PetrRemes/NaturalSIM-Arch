@@ -82,7 +82,8 @@ int32 ASimWorldManager::GetTotalPopulation() const {
     return Total;
 }
 
-bool ASimWorldManager::GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellData*& OutCell, FIntPoint& OutChunkCoord) {
+// OPTIMALIZACE 4: Podpora dvou polí pøi získávání pointerù z mapy
+bool ASimWorldManager::GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellStaticData*& OutStatic, FCellDynamicData*& OutDynamic, FIntPoint& OutChunkCoord) {
     if (GlobalX < 0 || GlobalY < 0) return false;
     int32 CSize = ChunkSize - 1;
     if (CSize <= 0) return false;
@@ -95,8 +96,9 @@ bool ASimWorldManager::GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellD
     FIntPoint Coord(CX, CY);
     if (FChunkData* Chunk = WorldChunks.Find(Coord)) {
         int32 Idx = LX + LY * ChunkSize;
-        if (Chunk->MicroCells.IsValidIndex(Idx)) {
-            OutCell = &Chunk->MicroCells[Idx];
+        if (Chunk->StaticCells.IsValidIndex(Idx) && Chunk->DynamicCells.IsValidIndex(Idx)) {
+            OutStatic = &Chunk->StaticCells[Idx];
+            OutDynamic = &Chunk->DynamicCells[Idx];
             OutChunkCoord = Coord;
             return true;
         }
@@ -104,17 +106,19 @@ bool ASimWorldManager::GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellD
     return false;
 }
 
-bool ASimWorldManager::GetCellGlobal(int32 GlobalX, int32 GlobalY, FCellData& OutCell) {
-    FCellData* CellPtr = nullptr;
+bool ASimWorldManager::GetCellGlobal(int32 GlobalX, int32 GlobalY, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic) {
+    FCellStaticData* StaticPtr = nullptr;
+    FCellDynamicData* DynamicPtr = nullptr;
     FIntPoint DummyCoord;
-    if (GetMutableCellGlobal(GlobalX, GlobalY, CellPtr, DummyCoord) && CellPtr != nullptr) {
-        OutCell = *CellPtr;
+    if (GetMutableCellGlobal(GlobalX, GlobalY, StaticPtr, DynamicPtr, DummyCoord) && StaticPtr != nullptr && DynamicPtr != nullptr) {
+        OutStatic = *StaticPtr;
+        OutDynamic = *DynamicPtr;
         return true;
     }
     return false;
 }
 
-bool ASimWorldManager::GetCellGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellData*& OutCell) const {
+bool ASimWorldManager::GetCellStaticGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellStaticData*& OutStatic) const {
     if (GlobalX < 0 || GlobalY < 0) return false;
     int32 CSize = ChunkSize - 1;
     if (CSize <= 0) return false;
@@ -123,8 +127,25 @@ bool ASimWorldManager::GetCellGlobalPtr(int32 GlobalX, int32 GlobalY, const FCel
 
     if (const FChunkData* Chunk = WorldChunks.Find(Coord)) {
         int32 Idx = (GlobalX % CSize) + (GlobalY % CSize) * ChunkSize;
-        if (Chunk->MicroCells.IsValidIndex(Idx)) {
-            OutCell = &Chunk->MicroCells[Idx];
+        if (Chunk->StaticCells.IsValidIndex(Idx)) {
+            OutStatic = &Chunk->StaticCells[Idx];
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ASimWorldManager::GetCellDynamicGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellDynamicData*& OutDynamic) const {
+    if (GlobalX < 0 || GlobalY < 0) return false;
+    int32 CSize = ChunkSize - 1;
+    if (CSize <= 0) return false;
+
+    FIntPoint Coord(GlobalX / CSize, GlobalY / CSize);
+
+    if (const FChunkData* Chunk = WorldChunks.Find(Coord)) {
+        int32 Idx = (GlobalX % CSize) + (GlobalY % CSize) * ChunkSize;
+        if (Chunk->DynamicCells.IsValidIndex(Idx)) {
+            OutDynamic = &Chunk->DynamicCells[Idx];
             return true;
         }
     }
@@ -161,27 +182,30 @@ void ASimWorldManager::SyncChunkEdges(const TSet<FIntPoint>& ActiveChunks) {
 
         bool bNeedsRender = false;
 
-        auto SyncCell = [&](int32 DestX, int32 DestY, const FCellData& SrcCell) {
-            FCellData& DestCell = Chunk->MicroCells[DestX + DestY * ChunkSize];
-            if (FMath::Abs(DestCell.Elevation - SrcCell.Elevation) > 0.5f ||
-                FMath::Abs(DestCell.SurfaceWater - SrcCell.SurfaceWater) > 0.5f) {
+        auto SyncCell = [&](int32 DestX, int32 DestY, const FCellStaticData& SrcS, const FCellDynamicData& SrcD) {
+            FCellStaticData& DestS = Chunk->StaticCells[DestX + DestY * ChunkSize];
+            FCellDynamicData& DestD = Chunk->DynamicCells[DestX + DestY * ChunkSize];
+
+            if (FMath::Abs(DestS.Elevation - SrcS.Elevation) > 0.5f ||
+                FMath::Abs(DestD.SurfaceWater - SrcD.SurfaceWater) > 0.5f) {
                 bNeedsRender = true;
             }
-            DestCell = SrcCell;
+            DestS = SrcS;
+            DestD = SrcD;
             };
 
         if (const FChunkData* RightChunk = WorldChunks.Find(Coord + FIntPoint(1, 0))) {
             for (int32 Y = 0; Y < ChunkSize; Y++) {
-                SyncCell(CSize, Y, RightChunk->MicroCells[0 + Y * ChunkSize]);
+                SyncCell(CSize, Y, RightChunk->StaticCells[0 + Y * ChunkSize], RightChunk->DynamicCells[0 + Y * ChunkSize]);
             }
         }
         if (const FChunkData* BottomChunk = WorldChunks.Find(Coord + FIntPoint(0, 1))) {
             for (int32 X = 0; X < ChunkSize; X++) {
-                SyncCell(X, CSize, BottomChunk->MicroCells[X + 0 * ChunkSize]);
+                SyncCell(X, CSize, BottomChunk->StaticCells[X + 0 * ChunkSize], BottomChunk->DynamicCells[X + 0 * ChunkSize]);
             }
         }
         if (const FChunkData* BRChunk = WorldChunks.Find(Coord + FIntPoint(1, 1))) {
-            SyncCell(CSize, CSize, BRChunk->MicroCells[0]);
+            SyncCell(CSize, CSize, BRChunk->StaticCells[0], BRChunk->DynamicCells[0]);
         }
 
         if (bNeedsRender) {
@@ -375,8 +399,6 @@ FChunkGenerationParameters ASimWorldManager::GetGenerationParams() const {
     P.bUseLOD = true; FVector PLoc = GetPlayerLocation(); P.PlayerPos2D = FVector2D(PLoc.X, PLoc.Y);
 
     P.ViewMode = CurrentViewMode;
-
-    // OPTIMALIZACE: Pøedáme Cache do parametrù pro všechny moduly
     P.GlobalTerrainCache = GlobalTerrainCache;
     P.TotalWorldCellsX = WorldSizeInChunksX * ChunkSize;
     P.TotalWorldCellsY = WorldSizeInChunksY * ChunkSize;
@@ -393,7 +415,6 @@ void ASimWorldManager::ProcessNextChunk() {
                 if (HydroModule) {
                     WorldChunks.GetKeys(CachedChunkKeys);
 
-                    // OPTIMALIZACE 2: Konec zamrznutí editoru. Zdlouhavá simulace 50 krokù vody se provede asynchronnì na pozadí!
                     TWeakObjectPtr<ASimWorldManager> WeakThis(this);
                     AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis]() {
                         if (!WeakThis.IsValid()) return;
@@ -406,7 +427,6 @@ void ASimWorldManager::ProcessNextChunk() {
                             Manager->SyncChunkEdges(AllChunksSet);
                         }
 
-                        // Až voda doteèe, asynchronnì "zaklepeme" na GameThread a spustíme zbytek
                         AsyncTask(ENamedThreads::GameThread, [WeakThis]() {
                             if (!WeakThis.IsValid()) return;
                             ASimWorldManager* FinalMain = WeakThis.Get();
@@ -425,8 +445,6 @@ void ASimWorldManager::ProcessNextChunk() {
                                 FinalMain->SimDirector->StartSimulationTimer();
                             }
                             if (FinalMain->RendererModule) { FinalMain->RendererModule->UpdateFastEntities(); }
-
-                            // Hotovo! Obrovský pamìový blok (Cache) už nepotøebujeme, mùžeme RAM uvolnit.
                             FinalMain->GlobalTerrainCache.Reset();
                             });
                         });
@@ -475,7 +493,9 @@ void ASimWorldManager::GenerateChunk(FIntPoint ChunkCoordinate, bool bIsFullGene
     TSharedPtr<FChunkData> LocalChunk = MakeShared<FChunkData>();
 
     if (bIsFullGeneration) {
-        LocalChunk->MicroCells.SetNum(ChunkSize * ChunkSize);
+        // OPTIMALIZACE 4: Init pole statických a dynamických bunìk
+        LocalChunk->StaticCells.SetNum(ChunkSize * ChunkSize);
+        LocalChunk->DynamicCells.SetNum(ChunkSize * ChunkSize);
     }
     else if (FChunkData* ExistingChunk = WorldChunks.Find(ChunkCoordinate)) {
         *LocalChunk = *ExistingChunk;
@@ -645,7 +665,6 @@ void ASimWorldManager::RegenerateWorld() {
 
     GenerateContinentCenters();
 
-    // OPTIMALIZACE 2: Pøed samotným generováním si asynchronnì v jednom zátahu pøedpoèítáme celý šum mapy
     GlobalTerrainCache = MakeShared<TArray<FPrecomputedTerrain>>();
     GlobalTerrainCache->SetNumZeroed(WorldSizeInChunksX * ChunkSize * WorldSizeInChunksY * ChunkSize);
 
@@ -691,12 +710,13 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
     int32 ChunkRadius = FMath::CeilToInt(Radius / ChunkWorldSize) + 1;
 
     bool bTriggerTsunami = false;
-    FCellData EpicenterCell;
+    FCellStaticData SCellEpi;
+    FCellDynamicData DCellEpi;
     int32 EpicenterGlobalX = FMath::FloorToInt(GlobalEpicenter.X / CellSize);
     int32 EpicenterGlobalY = FMath::FloorToInt(GlobalEpicenter.Y / CellSize);
 
-    if (GetCellGlobal(EpicenterGlobalX, EpicenterGlobalY, EpicenterCell)) {
-        if (EpicenterCell.Elevation <= SeaLevel || EpicenterCell.SurfaceWater > 5.0f) {
+    if (GetCellGlobal(EpicenterGlobalX, EpicenterGlobalY, SCellEpi, DCellEpi)) {
+        if (SCellEpi.Elevation <= SeaLevel || DCellEpi.SurfaceWater > 5.0f) {
             bTriggerTsunami = true;
         }
     }
@@ -711,9 +731,10 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
                 for (int32 Y = 0; Y < ChunkSize; Y++) {
                     for (int32 X = 0; X < ChunkSize; X++) {
                         int32 i = X + Y * ChunkSize;
-                        if (i >= Chunk->MicroCells.Num()) continue;
+                        if (i >= Chunk->StaticCells.Num()) continue;
 
-                        FCellData& Cell = Chunk->MicroCells[i];
+                        FCellStaticData& SCell = Chunk->StaticCells[i];
+                        FCellDynamicData& DCell = Chunk->DynamicCells[i];
 
                         FVector2D CellGlobalPos((cx * (ChunkSize - 1) + X) * CellSize, (cy * (ChunkSize - 1) + Y) * CellSize);
 
@@ -730,16 +751,16 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
 
                             float Shake = FMath::FRandRange(-1.0f, 1.0f) * LocalIntensity * 1.5f;
 
-                            Cell.Elevation += Shake;
-                            Cell.DangerLevel = FMath::Min(1.0f, Cell.DangerLevel + LocalIntensity * 2.0f);
+                            SCell.Elevation += Shake;
+                            DCell.DangerLevel = FMath::Min(1.0f, DCell.DangerLevel + LocalIntensity * 2.0f);
 
                             if (LocalIntensity > 0.7f) {
-                                Cell.HouseDensity *= 0.5f;
-                                if (FMath::FRand() < 0.2f) Cell.bHasRoad = false;
-                                if (FMath::FRand() < 0.3f) Cell.BuildingType = EBuildingType::None;
-                                if (Cell.TreeType != ETreeType::None && FMath::FRand() < 0.1f) {
-                                    Cell.TreeType = ETreeType::None;
-                                    Cell.WoodAmount = 0.0f;
+                                DCell.HouseDensity *= 0.5f;
+                                if (FMath::FRand() < 0.2f) SCell.bHasRoad = false;
+                                if (FMath::FRand() < 0.3f) SCell.BuildingType = EBuildingType::None;
+                                if (SCell.TreeType != ETreeType::None && FMath::FRand() < 0.1f) {
+                                    SCell.TreeType = ETreeType::None;
+                                    DCell.WoodAmount = 0.0f;
                                 }
                             }
                             Chunk->AccumulatedTerrainChange += FMath::Abs(Shake) * 0.5f;
@@ -774,36 +795,37 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
             FTsunamiNode Curr;
             WaveQueue.Dequeue(Curr);
 
-            FCellData* Cell = nullptr;
+            FCellStaticData* SCellPtr = nullptr;
+            FCellDynamicData* DCellPtr = nullptr;
             FIntPoint ChunkC;
 
-            if (GetMutableCellGlobal(Curr.Coord.X, Curr.Coord.Y, Cell, ChunkC)) {
+            if (GetMutableCellGlobal(Curr.Coord.X, Curr.Coord.Y, SCellPtr, DCellPtr, ChunkC)) {
 
-                bool bIsLand = Cell->Elevation > SeaLevel;
-                float LocalElev = bIsLand ? (Cell->Elevation - SeaLevel) : 0.0f;
+                bool bIsLand = SCellPtr->Elevation > SeaLevel;
+                float LocalElev = bIsLand ? (SCellPtr->Elevation - SeaLevel) : 0.0f;
 
                 if (LocalElev > Curr.WaveHeight) {
                     continue;
                 }
 
                 if (bIsLand) {
-                    Cell->SurfaceWater += Curr.WaveHeight * 2.0f;
-                    Cell->WaterInflowBuffer += Curr.WaveHeight * 10.0f;
+                    DCellPtr->SurfaceWater += Curr.WaveHeight * 2.0f;
+                    DCellPtr->WaterInflowBuffer += Curr.WaveHeight * 10.0f;
 
-                    Cell->WaterPollution = FMath::Min(1.0f, Cell->WaterPollution + 0.8f);
-                    Cell->DangerLevel = 1.0f;
+                    DCellPtr->WaterPollution = FMath::Min(1.0f, DCellPtr->WaterPollution + 0.8f);
+                    DCellPtr->DangerLevel = 1.0f;
 
                     if (Curr.WaveHeight > 2.0f) {
-                        Cell->HouseDensity = 0.0f;
-                        Cell->BuildingType = EBuildingType::None;
-                        Cell->bHasRoad = false;
-                        if (Cell->TreeType != ETreeType::None) {
-                            Cell->TreeType = ETreeType::Deadwood;
-                            Cell->WoodAmount *= 0.2f;
-                            Cell->FloraDensity = 0.0f;
+                        DCellPtr->HouseDensity = 0.0f;
+                        SCellPtr->BuildingType = EBuildingType::None;
+                        SCellPtr->bHasRoad = false;
+                        if (SCellPtr->TreeType != ETreeType::None) {
+                            SCellPtr->TreeType = ETreeType::Deadwood;
+                            DCellPtr->WoodAmount *= 0.2f;
+                            DCellPtr->FloraDensity = 0.0f;
                         }
-                        Cell->BerryBushes = 0.0f;
-                        Cell->AnimalBones += 10.0f;
+                        DCellPtr->BerryBushes = 0.0f;
+                        DCellPtr->AnimalBones += 10.0f;
                     }
 
                     TsunamiDirtyChunks.Add(ChunkC);
@@ -916,14 +938,18 @@ bool ASimWorldManager::GetAnimalAtLocation(FVector WorldLocation, FAnimalData& O
     return false;
 }
 
-bool ASimWorldManager::GetCellDataAtLocation(FVector WorldLocation, FCellData& OutCell) {
+bool ASimWorldManager::GetCellDataAtLocation(FVector WorldLocation, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic) {
     float CellSize = 50.0f; float ChunkWorldSize = (ChunkSize - 1) * CellSize;
     int32 CX = FMath::FloorToInt(WorldLocation.X / ChunkWorldSize); int32 CY = FMath::FloorToInt(WorldLocation.Y / ChunkWorldSize); FIntPoint ChunkCoord(CX, CY);
     if (FChunkData* Chunk = WorldChunks.Find(ChunkCoord)) {
         int32 LX = FMath::Clamp(FMath::FloorToInt((WorldLocation.X - (CX * ChunkWorldSize)) / CellSize), 0, ChunkSize - 1);
         int32 LY = FMath::Clamp(FMath::FloorToInt((WorldLocation.Y - (CY * ChunkWorldSize)) / CellSize), 0, ChunkSize - 1);
         int32 Idx = LX + LY * ChunkSize;
-        if (Chunk->MicroCells.IsValidIndex(Idx)) { OutCell = Chunk->MicroCells[Idx]; return true; }
+        if (Chunk->StaticCells.IsValidIndex(Idx)) {
+            OutStatic = Chunk->StaticCells[Idx];
+            OutDynamic = Chunk->DynamicCells[Idx];
+            return true;
+        }
     }
     return false;
 }

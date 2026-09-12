@@ -20,7 +20,6 @@ void UDisasterSystem::ProcessDisasters(ASimWorldManager* Manager, float DeltaDay
     for (int32 i = ActiveWarnings.Num() - 1; i >= 0; i--) {
         ActiveWarnings[i].DaysToImpact -= DeltaDays;
 
-        // FÁZE 2: Fyzické spuštìní katastrofy, jakmile vyprší èas
         if (ActiveWarnings[i].DaysToImpact <= 0.0f && ActiveWarnings[i].DaysToImpact > -DeltaDays) {
 
             if (ActiveWarnings[i].Type == EDisasterType::Earthquake) {
@@ -31,7 +30,6 @@ void UDisasterSystem::ProcessDisasters(ASimWorldManager* Manager, float DeltaDay
                     FMath::FloorToInt(ActiveWarnings[i].Epicenter.Y / ((ChunkSize - 1) * CellSize))
                 );
 
-                // Nyní se zemìtøesení fyzicky a deterministicky aplikuje na svìt
                 Manager->TriggerEarthquake(EpicenterChunk, ActiveWarnings[i].Radius, ActiveWarnings[i].Severity);
             }
         }
@@ -63,13 +61,13 @@ void UDisasterSystem::EvaluateFloodRisks(ASimWorldManager* Manager)
         float MaxSurfaceWater = 0.0f;
 
         for (FIntPoint Coord : City.ClaimedCells) {
-            const FCellData* Cell = nullptr;
-            if (Manager->GetCellGlobalPtr(Coord.X, Coord.Y, Cell)) {
-                if (Cell->Elevation > Manager->SeaLevel) {
-                    TotalRain += Cell->Rainfall;
+            FCellStaticData SCell; FCellDynamicData DCell;
+            if (Manager->GetCellGlobal(Coord.X, Coord.Y, SCell, DCell)) {
+                if (SCell.Elevation > Manager->SeaLevel) {
+                    TotalRain += DCell.Rainfall;
 
-                    if (Cell->SurfaceWater > Cell->ChannelDepth + Cell->BankHeight) {
-                        float SpillOver = Cell->SurfaceWater - (Cell->ChannelDepth + Cell->BankHeight);
+                    if (DCell.SurfaceWater > SCell.ChannelDepth + SCell.BankHeight) {
+                        float SpillOver = DCell.SurfaceWater - (SCell.ChannelDepth + SCell.BankHeight);
                         MaxSurfaceWater = FMath::Max(MaxSurfaceWater, SpillOver);
                     }
                 }
@@ -104,10 +102,11 @@ void UDisasterSystem::EvaluateVolcanicRisks(ASimWorldManager* Manager)
 
         if (Chunk.BaseTectonicPressure < 0.1f) continue;
 
-        for (int32 i = 0; i < Chunk.MicroCells.Num(); i++) {
-            const FCellData& Cell = Chunk.MicroCells[i];
+        for (int32 i = 0; i < Chunk.StaticCells.Num(); i++) {
+            const FCellStaticData& SCell = Chunk.StaticCells[i];
+            const FCellDynamicData& DCell = Chunk.DynamicCells[i];
 
-            if (Cell.bIsVolcano && Cell.EruptionDaysRemaining > 0.0f && Cell.EruptionDaysRemaining < 10.0f) {
+            if (SCell.bIsVolcano && DCell.EruptionDaysRemaining > 0.0f && DCell.EruptionDaysRemaining < 10.0f) {
 
                 int32 GlobalX = (Pair.Key.X * (Manager->ChunkSize - 1)) + (i % Manager->ChunkSize);
                 int32 GlobalY = (Pair.Key.Y * (Manager->ChunkSize - 1)) + (i / Manager->ChunkSize);
@@ -126,7 +125,7 @@ void UDisasterSystem::EvaluateVolcanicRisks(ASimWorldManager* Manager)
                     Warning.Type = EDisasterType::VolcanicEruption;
                     Warning.Epicenter = VolcPos;
                     Warning.Severity = 10.0f;
-                    Warning.DaysToImpact = Cell.EruptionDaysRemaining;
+                    Warning.DaysToImpact = DCell.EruptionDaysRemaining;
                     Warning.Radius = 15000.0f;
 
                     for (const FSettlementData& City : Manager->SettlementModule->Settlements) {

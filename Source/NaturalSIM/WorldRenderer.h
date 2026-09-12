@@ -38,7 +38,7 @@ public:
     UPROPERTY(VisibleAnywhere, Category = "Rendering") UHierarchicalInstancedStaticMeshComponent* FogHISM;
     UPROPERTY(VisibleAnywhere, Category = "Rendering") UHierarchicalInstancedStaticMeshComponent* DisasterHISM;
 
-    static FLinearColor GetHeatmapColor(const FCellData& CellData, EWorldViewMode ViewMode);
+    static FLinearColor GetHeatmapColor(const FCellStaticData& SCell, const FCellDynamicData& DCell, EWorldViewMode ViewMode);
 
     static void BuildTerrainMesh(TSharedPtr<FChunkMeshData> MeshData, const FChunkData& Chunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params);
     static void BuildWaterMesh(TSharedPtr<FChunkMeshData> MeshData, const FChunkData& Chunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params);

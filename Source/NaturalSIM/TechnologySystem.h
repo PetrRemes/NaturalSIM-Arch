@@ -24,12 +24,12 @@ public:
 
     void GainKnowledge(FKnowledgeContainer& Container, EKnowledgeField Field, float Amount, float LiteracyBonus = 0.0f, float PressBonus = 0.0f);
 
-    void EvaluateEntityKnowledge(FKnowledgeContainer& Knowledge, FCultureProfile& Culture, const FCellData& LocalEnvironment, ASimWorldManager* Manager, int32 EntityID, bool bIsSettlement, FVector2D Location);
+    void EvaluateEntityKnowledge(FKnowledgeContainer& Knowledge, FCultureProfile& Culture, const FCellStaticData& SCell, const FCellDynamicData& DCell, ASimWorldManager* Manager, int32 EntityID, bool bIsSettlement, FVector2D Location);
 
 private:
     void RegisterDefaultDiscoveries();
     void RegisterDefaultTechTree();
 
-    bool CheckEnvironmentalTrigger(FName Trigger, const FCellData& Env, ASimWorldManager* Manager);
+    bool CheckEnvironmentalTrigger(FName Trigger, const FCellStaticData& SCell, const FCellDynamicData& DCell, ASimWorldManager* Manager);
     bool CheckExperienceTrigger(FName Trigger, const FKnowledgeContainer& Knowledge);
 };

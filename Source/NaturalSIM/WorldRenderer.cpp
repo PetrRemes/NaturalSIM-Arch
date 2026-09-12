@@ -91,10 +91,10 @@ void UWorldRenderer::ClearAllMeshes() {
     if (DisasterHISM) DisasterHISM->ClearInstances();
 }
 
-FLinearColor UWorldRenderer::GetHeatmapColor(const FCellData& CellData, EWorldViewMode ViewMode)
+FLinearColor UWorldRenderer::GetHeatmapColor(const FCellStaticData& SCell, const FCellDynamicData& DCell, EWorldViewMode ViewMode)
 {
     if (ViewMode == EWorldViewMode::Temperature) {
-        float T = FMath::Clamp(CellData.Temperature, -15.0f, 40.0f);
+        float T = FMath::Clamp(DCell.Temperature, -15.0f, 40.0f);
         float Alpha = (T + 15.0f) / 55.0f;
         if (Alpha < 0.25f) return FMath::Lerp(FLinearColor(0.0f, 0.0f, 0.8f, 1.0f), FLinearColor(0.0f, 0.8f, 1.0f, 1.0f), Alpha / 0.25f);
         else if (Alpha < 0.5f) return FMath::Lerp(FLinearColor(0.0f, 0.8f, 1.0f, 1.0f), FLinearColor(0.0f, 1.0f, 0.0f, 1.0f), (Alpha - 0.25f) / 0.25f);
@@ -102,16 +102,16 @@ FLinearColor UWorldRenderer::GetHeatmapColor(const FCellData& CellData, EWorldVi
         else return FMath::Lerp(FLinearColor(1.0f, 1.0f, 0.0f, 1.0f), FLinearColor(1.0f, 0.0f, 0.0f, 1.0f), (Alpha - 0.75f) / 0.25f);
     }
     else if (ViewMode == EWorldViewMode::Humidity) {
-        float H = FMath::Clamp(CellData.Humidity, 0.0f, 1.0f);
+        float H = FMath::Clamp(DCell.Humidity, 0.0f, 1.0f);
         return FMath::Lerp(FLinearColor(0.9f, 0.8f, 0.5f, 1.0f), FLinearColor(0.0f, 0.3f, 1.0f, 1.0f), H);
     }
     else if (ViewMode == EWorldViewMode::Rainfall) {
-        float R = FMath::Clamp(CellData.Rainfall / 3.0f, 0.0f, 1.0f);
+        float R = FMath::Clamp(DCell.Rainfall / 3.0f, 0.0f, 1.0f);
         return FMath::Lerp(FLinearColor(0.95f, 0.95f, 0.95f, 1.0f), FLinearColor(0.1f, 0.0f, 0.7f, 1.0f), R);
     }
     else if (ViewMode == EWorldViewMode::TectonicStress) {
-        float Stress = FMath::Pow(FMath::Clamp(CellData.TectonicStress, 0.0f, 1.0f), 2.5f);
-        float Magma = FMath::Clamp(CellData.MagmaPressure / 800.0f, 0.0f, 1.0f);
+        float Stress = FMath::Pow(FMath::Clamp(DCell.TectonicStress, 0.0f, 1.0f), 2.5f);
+        float Magma = FMath::Clamp(DCell.MagmaPressure / 800.0f, 0.0f, 1.0f);
 
         FLinearColor BaseColor;
         if (Stress < 0.15f) BaseColor = FLinearColor(0.4f, 0.8f, 0.4f, 1.0f);
@@ -119,21 +119,21 @@ FLinearColor UWorldRenderer::GetHeatmapColor(const FCellData& CellData, EWorldVi
         else BaseColor = FMath::Lerp(FLinearColor(0.8f, 0.4f, 0.4f, 1.0f), FLinearColor(0.9f, 0.1f, 0.1f, 1.0f), (Stress - 0.45f) / 0.55f);
 
         if (Magma > 0.05f) BaseColor = FMath::Lerp(BaseColor, FLinearColor(0.05f, 0.05f, 0.05f, 1.0f), Magma);
-        if (CellData.Lava > 0.1f || CellData.bIsVolcano) return FLinearColor(1.0f, 0.3f, 0.0f, 1.0f);
+        if (DCell.Lava > 0.1f || SCell.bIsVolcano) return FLinearColor(1.0f, 0.3f, 0.0f, 1.0f);
 
         return BaseColor;
     }
     else if (ViewMode == EWorldViewMode::Danger) {
-        float D = FMath::Clamp(CellData.DangerLevel, 0.0f, 1.0f);
+        float D = FMath::Clamp(DCell.DangerLevel, 0.0f, 1.0f);
         if (D < 0.5f) return FMath::Lerp(FLinearColor(0.0f, 0.8f, 0.2f, 1.0f), FLinearColor(1.0f, 1.0f, 0.0f, 1.0f), D * 2.0f);
         else return FMath::Lerp(FLinearColor(1.0f, 1.0f, 0.0f, 1.0f), FLinearColor(1.0f, 0.0f, 0.0f, 1.0f), (D - 0.5f) * 2.0f);
     }
     else if (ViewMode == EWorldViewMode::Political) {
-        if (CellData.OwnerSettlementID != -1) {
-            FLinearColor Base = CellData.BiomeColor;
-            return FLinearColor::LerpUsingHSV(Base, CellData.PoliticalColor, 0.7f);
+        if (SCell.OwnerSettlementID != -1) {
+            FLinearColor Base = SCell.BiomeColor;
+            return FLinearColor::LerpUsingHSV(Base, SCell.PoliticalColor, 0.7f);
         }
-        if (CellData.Elevation <= 0.0f) return FLinearColor(0.1f, 0.2f, 0.35f, 1.0f);
+        if (SCell.Elevation <= 0.0f) return FLinearColor(0.1f, 0.2f, 0.35f, 1.0f);
         return FLinearColor(0.85f, 0.80f, 0.70f, 1.0f);
     }
     return FLinearColor::White;
@@ -161,17 +161,17 @@ void UWorldRenderer::BuildTerrainMesh(TSharedPtr<FChunkMeshData> MeshData, const
             int32 IdxTL = X + (Y * ChunkSize); int32 IdxTR = NextX + (Y * ChunkSize);
             int32 IdxBL = X + (NextY * ChunkSize); int32 IdxBR = NextX + (NextY * ChunkSize);
 
-            float Z_TL = Chunk.MicroCells[IdxTL].Elevation + Chunk.MicroCells[IdxTL].GlacierIce;
-            float Z_TR = Chunk.MicroCells[IdxTR].Elevation + Chunk.MicroCells[IdxTR].GlacierIce;
-            float Z_BL = Chunk.MicroCells[IdxBL].Elevation + Chunk.MicroCells[IdxBL].GlacierIce;
-            float Z_BR = Chunk.MicroCells[IdxBR].Elevation + Chunk.MicroCells[IdxBR].GlacierIce;
+            float Z_TL = Chunk.StaticCells[IdxTL].Elevation + Chunk.DynamicCells[IdxTL].GlacierIce;
+            float Z_TR = Chunk.StaticCells[IdxTR].Elevation + Chunk.DynamicCells[IdxTR].GlacierIce;
+            float Z_BL = Chunk.StaticCells[IdxBL].Elevation + Chunk.DynamicCells[IdxBL].GlacierIce;
+            float Z_BR = Chunk.StaticCells[IdxBR].Elevation + Chunk.DynamicCells[IdxBR].GlacierIce;
 
             FVector P_TL((ChunkCoord.X * (ChunkSize - 1) + X) * CellSize, (ChunkCoord.Y * (ChunkSize - 1) + Y) * CellSize, Z_TL);
             FVector P_TR((ChunkCoord.X * (ChunkSize - 1) + NextX) * CellSize, (ChunkCoord.Y * (ChunkSize - 1) + Y) * CellSize, Z_TR);
             FVector P_BL((ChunkCoord.X * (ChunkSize - 1) + X) * CellSize, (ChunkCoord.Y * (ChunkSize - 1) + NextY) * CellSize, Z_BL);
             FVector P_BR((ChunkCoord.X * (ChunkSize - 1) + NextX) * CellSize, (ChunkCoord.Y * (ChunkSize - 1) + NextY) * CellSize, Z_BR);
 
-            auto AddTerrainTri = [&](FVector V1, FVector V2, FVector V3, const FCellData& CellData)
+            auto AddTerrainTri = [&](FVector V1, FVector V2, FVector V3, const FCellStaticData& SCell, const FCellDynamicData& DCell)
                 {
                     FVector N = FVector::CrossProduct(V2 - V1, V3 - V1).GetSafeNormal();
                     if (N.Z < 0.0f) N = -N;
@@ -179,49 +179,49 @@ void UWorldRenderer::BuildTerrainMesh(TSharedPtr<FChunkMeshData> MeshData, const
                     FLinearColor FinalColor = FLinearColor::White;
 
                     if (Params.ViewMode == EWorldViewMode::Normal) {
-                        FinalColor = CellData.BiomeColor;
+                        FinalColor = SCell.BiomeColor;
 
-                        if (CellData.Lava > 0.1f) FinalColor = FLinearColor(1.0f, 0.4f, 0.0f, 1.0f);
-                        else if (CellData.bIsVolcano && CellData.Lava < 0.1f) FinalColor = FLinearColor(0.12f, 0.10f, 0.10f, 1.0f);
+                        if (DCell.Lava > 0.1f) FinalColor = FLinearColor(1.0f, 0.4f, 0.0f, 1.0f);
+                        else if (SCell.bIsVolcano && DCell.Lava < 0.1f) FinalColor = FLinearColor(0.12f, 0.10f, 0.10f, 1.0f);
                         else {
-                            bool bIsSteep = N.Z < 0.75f && CellData.SurfaceWater < 1.0f;
+                            bool bIsSteep = N.Z < 0.75f && DCell.SurfaceWater < 1.0f;
 
                             if (bIsSteep) {
                                 FinalColor = FLinearColor(0.35f, 0.30f, 0.25f, 1.0f);
                             }
 
-                            if (CellData.BuildingType == EBuildingType::Farm) {
+                            if (SCell.BuildingType == EBuildingType::Farm) {
                                 FinalColor = FMath::Lerp(FinalColor, FLinearColor(0.85f, 0.75f, 0.25f, 1.0f), 0.85f);
                             }
-                            else if (CellData.BuildingType == EBuildingType::Blacksmith) {
+                            else if (SCell.BuildingType == EBuildingType::Blacksmith) {
                                 FinalColor = FMath::Lerp(FinalColor, FLinearColor(0.15f, 0.15f, 0.15f, 1.0f), 0.9f);
                             }
-                            else if (CellData.BuildingType == EBuildingType::Market) {
+                            else if (SCell.BuildingType == EBuildingType::Market) {
                                 FinalColor = FMath::Lerp(FinalColor, FLinearColor(0.6f, 0.4f, 0.3f, 1.0f), 0.7f);
                             }
 
-                            if (CellData.AnimalBones > 0.1f)
+                            if (DCell.AnimalBones > 0.1f)
                             {
-                                FinalColor = FMath::Lerp(FinalColor, FLinearColor(0.8f, 0.8f, 0.8f, 1.0f), FMath::Clamp(CellData.AnimalBones / 50.0f, 0.0f, 0.8f));
+                                FinalColor = FMath::Lerp(FinalColor, FLinearColor(0.8f, 0.8f, 0.8f, 1.0f), FMath::Clamp(DCell.AnimalBones / 50.0f, 0.0f, 0.8f));
                             }
 
-                            if (CellData.HouseDensity > 0.0f || CellData.bHasRoad || CellData.BuildingType == EBuildingType::Mine || CellData.BuildingType == EBuildingType::LumberCamp)
+                            if (DCell.HouseDensity > 0.0f || SCell.bHasRoad || SCell.BuildingType == EBuildingType::Mine || SCell.BuildingType == EBuildingType::LumberCamp)
                             {
                                 FLinearColor UrbanCol = FLinearColor(0.40f, 0.35f, 0.30f, 1.0f);
-                                FLinearColor BlendedBiome = FMath::Lerp(CellData.BiomeColor, UrbanCol, 0.6f);
+                                FLinearColor BlendedBiome = FMath::Lerp(SCell.BiomeColor, UrbanCol, 0.6f);
 
-                                float BlendAmount = (CellData.bHasRoad || CellData.BuildingType != EBuildingType::None) ? 0.8f : FMath::Clamp(CellData.HouseDensity, 0.0f, 0.85f);
+                                float BlendAmount = (SCell.bHasRoad || SCell.BuildingType != EBuildingType::None) ? 0.8f : FMath::Clamp(DCell.HouseDensity, 0.0f, 0.85f);
                                 FinalColor = FMath::Lerp(FinalColor, BlendedBiome, BlendAmount);
                             }
 
-                            if (CellData.WaterPollution > 0.0f)
+                            if (DCell.WaterPollution > 0.0f)
                             {
-                                float PollutionAlpha = FMath::Clamp(CellData.WaterPollution * 3.0f, 0.0f, 1.0f);
+                                float PollutionAlpha = FMath::Clamp(DCell.WaterPollution * 3.0f, 0.0f, 1.0f);
                                 FinalColor = FMath::Lerp(FinalColor, FLinearColor(0.20f, 0.18f, 0.15f, 1.0f), PollutionAlpha);
                             }
 
-                            if (CellData.SnowAmount > 0.05f) {
-                                float SnowAlpha = FMath::Clamp(CellData.SnowAmount / 1.5f, 0.0f, 1.0f);
+                            if (DCell.SnowAmount > 0.05f) {
+                                float SnowAlpha = FMath::Clamp(DCell.SnowAmount / 1.5f, 0.0f, 1.0f);
                                 if (bIsSteep) {
                                     float SteepnessDrop = FMath::Clamp((N.Z - 0.3f) * 2.5f, 0.0f, 1.0f);
                                     SnowAlpha *= SteepnessDrop;
@@ -229,28 +229,28 @@ void UWorldRenderer::BuildTerrainMesh(TSharedPtr<FChunkMeshData> MeshData, const
                                 FinalColor = FMath::Lerp(FinalColor, FLinearColor(0.95f, 0.98f, 1.0f, 1.0f), SnowAlpha);
                             }
 
-                            if (CellData.GlacierIce > 0.1f) {
-                                float IceAlpha = FMath::Clamp(CellData.GlacierIce / 15.0f, 0.0f, 1.0f);
+                            if (DCell.GlacierIce > 0.1f) {
+                                float IceAlpha = FMath::Clamp(DCell.GlacierIce / 15.0f, 0.0f, 1.0f);
                                 FLinearColor IceColor(0.5f, 0.8f, 0.95f, 1.0f);
                                 FinalColor = FMath::Lerp(FinalColor, IceColor, IceAlpha);
                             }
                         }
                     }
                     else {
-                        FinalColor = UWorldRenderer::GetHeatmapColor(CellData, Params.ViewMode);
-                        if (CellData.SurfaceWater > 0.1f && Params.ViewMode != EWorldViewMode::TectonicStress && Params.ViewMode != EWorldViewMode::Political) {
+                        FinalColor = UWorldRenderer::GetHeatmapColor(SCell, DCell, Params.ViewMode);
+                        if (DCell.SurfaceWater > 0.1f && Params.ViewMode != EWorldViewMode::TectonicStress && Params.ViewMode != EWorldViewMode::Political) {
                             FinalColor *= 0.6f;
                         }
                     }
 
                     float Light = Ambient + FMath::Max(0.0f, FVector::DotProduct(N, FakeSunDir)) * DiffuseMult;
-                    if (CellData.Lava > 0.1f || CellData.FireIntensity > 0.1f || (Params.ViewMode != EWorldViewMode::Normal && Params.ViewMode != EWorldViewMode::Political)) Light = 1.0f;
+                    if (DCell.Lava > 0.1f || DCell.FireIntensity > 0.1f || (Params.ViewMode != EWorldViewMode::Normal && Params.ViewMode != EWorldViewMode::Political)) Light = 1.0f;
 
                     FinalColor *= Light;
 
                     if (Params.ViewMode == EWorldViewMode::Normal) {
-                        FinalColor.A = FMath::Clamp(CellData.Wetness, 0.0f, 1.0f);
-                        if (CellData.SnowAmount > 0.05f || CellData.GlacierIce > 0.1f) {
+                        FinalColor.A = FMath::Clamp(DCell.Wetness, 0.0f, 1.0f);
+                        if (DCell.SnowAmount > 0.05f || DCell.GlacierIce > 0.1f) {
                             FinalColor.A = 0.0f;
                         }
                     }
@@ -269,8 +269,8 @@ void UWorldRenderer::BuildTerrainMesh(TSharedPtr<FChunkMeshData> MeshData, const
                     }
                 };
 
-            AddTerrainTri(P_TL, P_TR, P_BL, Chunk.MicroCells[IdxTL]);
-            AddTerrainTri(P_TR, P_BR, P_BL, Chunk.MicroCells[IdxTR]);
+            AddTerrainTri(P_TL, P_TR, P_BL, Chunk.StaticCells[IdxTL], Chunk.DynamicCells[IdxTL]);
+            AddTerrainTri(P_TR, P_BR, P_BL, Chunk.StaticCells[IdxTR], Chunk.DynamicCells[IdxTR]);
         }
     }
 }
@@ -296,23 +296,23 @@ void UWorldRenderer::BuildWaterMesh(TSharedPtr<FChunkMeshData> MeshData, const F
             int32 IdxTL = X + (Y * ChunkSize); int32 IdxTR = NextX + (Y * ChunkSize);
             int32 IdxBL = X + (NextY * ChunkSize); int32 IdxBR = NextX + (NextY * ChunkSize);
 
-            const FCellData& CTL = Chunk.MicroCells[IdxTL];
-            const FCellData& CTR = Chunk.MicroCells[IdxTR];
-            const FCellData& CBL = Chunk.MicroCells[IdxBL];
-            const FCellData& CBR = Chunk.MicroCells[IdxBR];
+            const FCellStaticData& STL = Chunk.StaticCells[IdxTL]; const FCellDynamicData& DTL = Chunk.DynamicCells[IdxTL];
+            const FCellStaticData& STR = Chunk.StaticCells[IdxTR]; const FCellDynamicData& DTR = Chunk.DynamicCells[IdxTR];
+            const FCellStaticData& SBL = Chunk.StaticCells[IdxBL]; const FCellDynamicData& DBL = Chunk.DynamicCells[IdxBL];
+            const FCellStaticData& SBR = Chunk.StaticCells[IdxBR]; const FCellDynamicData& DBR = Chunk.DynamicCells[IdxBR];
 
-            if (CTL.Elevation <= SeaLevel || CTL.SurfaceWater > 0.1f ||
-                CTR.Elevation <= SeaLevel || CTR.SurfaceWater > 0.1f ||
-                CBL.Elevation <= SeaLevel || CBL.SurfaceWater > 0.1f ||
-                CBR.Elevation <= SeaLevel || CBR.SurfaceWater > 0.1f)
+            if (STL.Elevation <= SeaLevel || DTL.SurfaceWater > 0.1f ||
+                STR.Elevation <= SeaLevel || DTR.SurfaceWater > 0.1f ||
+                SBL.Elevation <= SeaLevel || DBL.SurfaceWater > 0.1f ||
+                SBR.Elevation <= SeaLevel || DBR.SurfaceWater > 0.1f)
             {
                 float MaxW = SeaLevel;
                 bool bHasWater = false;
 
-                if (CTL.Elevation <= SeaLevel || CTL.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, CTL.Elevation <= SeaLevel ? SeaLevel : CTL.Elevation + CTL.SurfaceWater); bHasWater = true; }
-                if (CTR.Elevation <= SeaLevel || CTR.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, CTR.Elevation <= SeaLevel ? SeaLevel : CTR.Elevation + CTR.SurfaceWater); bHasWater = true; }
-                if (CBL.Elevation <= SeaLevel || CBL.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, CBL.Elevation <= SeaLevel ? SeaLevel : CBL.Elevation + CBL.SurfaceWater); bHasWater = true; }
-                if (CBR.Elevation <= SeaLevel || CBR.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, CBR.Elevation <= SeaLevel ? SeaLevel : CBR.Elevation + CBR.SurfaceWater); bHasWater = true; }
+                if (STL.Elevation <= SeaLevel || DTL.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, STL.Elevation <= SeaLevel ? SeaLevel : STL.Elevation + DTL.SurfaceWater); bHasWater = true; }
+                if (STR.Elevation <= SeaLevel || DTR.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, STR.Elevation <= SeaLevel ? SeaLevel : STR.Elevation + DTR.SurfaceWater); bHasWater = true; }
+                if (SBL.Elevation <= SeaLevel || DBL.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, SBL.Elevation <= SeaLevel ? SeaLevel : SBL.Elevation + DBL.SurfaceWater); bHasWater = true; }
+                if (SBR.Elevation <= SeaLevel || DBR.SurfaceWater > 0.1f) { MaxW = FMath::Max(MaxW, SBR.Elevation <= SeaLevel ? SeaLevel : SBR.Elevation + DBR.SurfaceWater); bHasWater = true; }
 
                 if (!bHasWater) continue;
 
@@ -321,16 +321,16 @@ void UWorldRenderer::BuildWaterMesh(TSharedPtr<FChunkMeshData> MeshData, const F
                 float P_BL_X = (ChunkCoord.X * (ChunkSize - 1) + X) * CellSize; float P_BL_Y = (ChunkCoord.Y * (ChunkSize - 1) + NextY) * CellSize;
                 float P_BR_X = (ChunkCoord.X * (ChunkSize - 1) + NextX) * CellSize; float P_BR_Y = (ChunkCoord.Y * (ChunkSize - 1) + NextY) * CellSize;
 
-                float WZ_TL = (CTL.Elevation <= SeaLevel) ? SeaLevel : (CTL.SurfaceWater > 0.1f ? CTL.Elevation + CTL.SurfaceWater : MaxW);
-                float WZ_TR = (CTR.Elevation <= SeaLevel) ? SeaLevel : (CTR.SurfaceWater > 0.1f ? CTR.Elevation + CTR.SurfaceWater : MaxW);
-                float WZ_BL = (CBL.Elevation <= SeaLevel) ? SeaLevel : (CBL.SurfaceWater > 0.1f ? CBL.Elevation + CBL.SurfaceWater : MaxW);
-                float WZ_BR = (CBR.Elevation <= SeaLevel) ? SeaLevel : (CBR.SurfaceWater > 0.1f ? CBR.Elevation + CBR.SurfaceWater : MaxW);
+                float WZ_TL = (STL.Elevation <= SeaLevel) ? SeaLevel : (DTL.SurfaceWater > 0.1f ? STL.Elevation + DTL.SurfaceWater : MaxW);
+                float WZ_TR = (STR.Elevation <= SeaLevel) ? SeaLevel : (DTR.SurfaceWater > 0.1f ? STR.Elevation + DTR.SurfaceWater : MaxW);
+                float WZ_BL = (SBL.Elevation <= SeaLevel) ? SeaLevel : (DBL.SurfaceWater > 0.1f ? SBL.Elevation + DBL.SurfaceWater : MaxW);
+                float WZ_BR = (SBR.Elevation <= SeaLevel) ? SeaLevel : (DBL.SurfaceWater > 0.1f ? SBR.Elevation + DBR.SurfaceWater : MaxW);
 
                 FVector W_TL(P_TL_X, P_TL_Y, WZ_TL); FVector W_TR(P_TR_X, P_TR_Y, WZ_TR);
                 FVector W_BL(P_BL_X, P_BL_Y, WZ_BL); FVector W_BR(P_BR_X, P_BR_Y, WZ_BR);
 
-                float AvgElev = (CTL.Elevation + CTR.Elevation + CBL.Elevation + CBR.Elevation) * 0.25f;
-                float AvgSurfaceWater = (CTL.SurfaceWater + CTR.SurfaceWater + CBL.SurfaceWater + CBR.SurfaceWater) * 0.25f;
+                float AvgElev = (STL.Elevation + STR.Elevation + SBL.Elevation + SBR.Elevation) * 0.25f;
+                float AvgSurfaceWater = (DTL.SurfaceWater + DTR.SurfaceWater + DBL.SurfaceWater + DBR.SurfaceWater) * 0.25f;
                 float Depth = (AvgElev <= SeaLevel) ? FMath::Max(0.0f, SeaLevel - AvgElev) : AvgSurfaceWater;
                 float DepthAlpha = FMath::Clamp(Depth / (AvgElev <= SeaLevel ? 60.0f : 5.0f), 0.0f, 1.0f);
 
@@ -340,7 +340,7 @@ void UWorldRenderer::BuildWaterMesh(TSharedPtr<FChunkMeshData> MeshData, const F
 
                 FLinearColor WaterColor = FMath::Lerp(ShallowWater, DeepWater, DepthAlpha);
 
-                float MaxFlow = FMath::Max(FMath::Max(CTL.WaterFlow, CTR.WaterFlow), FMath::Max(CBL.WaterFlow, CBR.WaterFlow));
+                float MaxFlow = FMath::Max(FMath::Max(DTL.WaterFlow, DTR.WaterFlow), FMath::Max(DBL.WaterFlow, DBR.WaterFlow));
                 float MaxZ = FMath::Max(FMath::Max(WZ_TL, WZ_TR), FMath::Max(WZ_BL, WZ_BR));
                 float MinZ = FMath::Min(FMath::Min(WZ_TL, WZ_TR), FMath::Min(WZ_BL, WZ_BR));
                 float SlopeDrop = MaxZ - MinZ;
@@ -353,7 +353,7 @@ void UWorldRenderer::BuildWaterMesh(TSharedPtr<FChunkMeshData> MeshData, const F
                 }
 
                 if (Params.ViewMode != EWorldViewMode::Normal) {
-                    WaterColor = UWorldRenderer::GetHeatmapColor(CTL, Params.ViewMode);
+                    WaterColor = UWorldRenderer::GetHeatmapColor(STL, DTL, Params.ViewMode);
                     WaterColor.A = 1.0f;
                 }
 
@@ -380,7 +380,7 @@ void UWorldRenderer::BuildWaterMesh(TSharedPtr<FChunkMeshData> MeshData, const F
 
 void UWorldRenderer::BuildChunkMesh_Async(TSharedPtr<FChunkMeshData> MeshData, const FChunkData& Chunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params, uint8 DirtyFlags, ASimWorldManager* Manager)
 {
-    if (Chunk.MicroCells.Num() == 0) return;
+    if (Chunk.StaticCells.Num() == 0 || Chunk.DynamicCells.Num() == 0) return;
 
     if (DirtyFlags & EChunkVisualDirty::Terrain || DirtyFlags & EChunkVisualDirty::TerrainColor) {
         BuildTerrainMesh(MeshData, Chunk, ChunkCoord, Params);
@@ -468,27 +468,28 @@ void UWorldRenderer::UpdateWeatherEntities()
         for (int32 Y = 0; Y < ChunkSize - 1; Y += Step) {
             for (int32 X = 0; X < ChunkSize - 1; X += Step) {
                 int32 Index = X + (Y * ChunkSize);
-                if (!Chunk.MicroCells.IsValidIndex(Index)) continue;
+                if (!Chunk.StaticCells.IsValidIndex(Index)) continue;
 
-                const FCellData& Cell = Chunk.MicroCells[Index];
+                const FCellStaticData& SCell = Chunk.StaticCells[Index];
+                const FCellDynamicData& DCell = Chunk.DynamicCells[Index];
 
                 float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
                 float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
-                float VisualCloudDensity = Cell.CloudDensity;
-                float VisualRainfall = Cell.Rainfall;
-                bool bHasAsh = Cell.AshDensity > 0.05f;
+                float VisualCloudDensity = DCell.CloudDensity;
+                float VisualRainfall = DCell.Rainfall;
+                bool bHasAsh = DCell.AshDensity > 0.05f;
 
-                if (Cell.Elevation > WorldManager->SeaLevel && VisualRainfall < 0.01f && !bHasAsh) {
+                if (SCell.Elevation > WorldManager->SeaLevel && VisualRainfall < 0.01f && !bHasAsh) {
                     int32 WakeX = FMath::Clamp(X + FMath::RoundToInt(GlobalWind.X * 12.0f), 0, ChunkSize - 1);
                     int32 WakeY = FMath::Clamp(Y + FMath::RoundToInt(GlobalWind.Y * 12.0f), 0, ChunkSize - 1);
-                    float WakeRain = Chunk.MicroCells[WakeX + WakeY * ChunkSize].Rainfall;
+                    float WakeRain = Chunk.DynamicCells[WakeX + WakeY * ChunkSize].Rainfall;
 
                     if (WakeRain > 0.15f) {
                         float FogNoise = FMath::PerlinNoise2D(FVector2D(LocalX * 0.001f, LocalY * 0.001f));
                         if (FogNoise > -0.2f) {
                             float FogAlpha = FMath::Clamp(WakeRain * 0.4f * (FogNoise + 0.5f), 0.0f, 0.35f);
                             if (FogAlpha > 0.05f) {
-                                FVector FogCenter(LocalX, LocalY, Cell.Elevation + Cell.GlacierIce + 10.0f + HalfStep);
+                                FVector FogCenter(LocalX, LocalY, SCell.Elevation + DCell.GlacierIce + 10.0f + HalfStep);
                                 FogTransforms.Add(FTransform(FRotator::ZeroRotator, FogCenter, FVector(CloudScaleXY * 0.98f)));
                                 FogColors.Add(FLinearColor(0.95f, 0.95f, 0.95f, FogAlpha));
                             }
@@ -496,15 +497,15 @@ void UWorldRenderer::UpdateWeatherEntities()
                     }
                 }
 
-                if (VisualCloudDensity < CloudDensityThreshold && !bHasAsh && Cell.EruptionDaysRemaining <= 0.0f) continue;
+                if (VisualCloudDensity < CloudDensityThreshold && !bHasAsh && DCell.EruptionDaysRemaining <= 0.0f) continue;
 
-                float TerrenZ = FMath::Max(0.0f, Cell.Elevation + Cell.GlacierIce - WorldManager->SeaLevel);
+                float TerrenZ = FMath::Max(0.0f, SCell.Elevation + DCell.GlacierIce - WorldManager->SeaLevel);
                 float CloudBaseZ = WorldManager->SeaLevel + 1200.0f + (TerrenZ * 0.5f);
 
                 CloudBaseZ += FMath::PerlinNoise2D(FVector2D(LocalX * 0.001f, LocalY * 0.001f)) * 50.0f;
 
-                if (Cell.EruptionDaysRemaining > 0.0f) {
-                    float Z = Cell.Elevation + Cell.GlacierIce + HalfStep;
+                if (DCell.EruptionDaysRemaining > 0.0f) {
+                    float Z = SCell.Elevation + DCell.GlacierIce + HalfStep;
                     while (Z < CloudBaseZ) {
                         CloudTransforms.Add(FTransform(FRotator::ZeroRotator, FVector(LocalX, LocalY, Z), FVector(CloudScaleXY * 1.5f)));
                         CloudColors.Add(FLinearColor(0.05f, 0.05f, 0.05f, 0.98f));
@@ -513,7 +514,7 @@ void UWorldRenderer::UpdateWeatherEntities()
                 }
 
                 if (bHasAsh) {
-                    float AshAlpha = FMath::Clamp(Cell.AshDensity / 5.0f, 0.0f, 1.0f);
+                    float AshAlpha = FMath::Clamp(DCell.AshDensity / 5.0f, 0.0f, 1.0f);
                     CloudTransforms.Add(FTransform(FRotator::ZeroRotator, FVector(LocalX, LocalY, CloudBaseZ - HalfStep), FVector(CloudScaleXY * 1.2f)));
                     CloudColors.Add(FLinearColor(0.12f, 0.10f, 0.10f, AshAlpha * 0.95f));
                 }
@@ -540,8 +541,8 @@ void UWorldRenderer::UpdateWeatherEntities()
 
                     if (VisualRainfall > 0.05f) {
                         float DropZ = CloudBaseZ - HalfStep;
-                        float RainHeight = DropZ - (Cell.Elevation + Cell.GlacierIce);
-                        FVector RainCenter(LocalX, LocalY, Cell.Elevation + Cell.GlacierIce + (RainHeight * 0.5f));
+                        float RainHeight = DropZ - (SCell.Elevation + DCell.GlacierIce);
+                        FVector RainCenter(LocalX, LocalY, SCell.Elevation + DCell.GlacierIce + (RainHeight * 0.5f));
 
                         float RainScaleZ = RainHeight / 100.0f;
                         RainTransforms.Add(FTransform(FRotator::ZeroRotator, RainCenter, FVector(CloudScaleXY * 0.4f, CloudScaleXY * 0.4f, RainScaleZ)));
@@ -552,7 +553,6 @@ void UWorldRenderer::UpdateWeatherEntities()
         }
     }
 
-    // OPRAVA D3D12 CRASHE: Batch update s plnì ošetøeným Scale, brání pádu GPU driveru
     auto SyncHISM = [](UHierarchicalInstancedStaticMeshComponent* HISM, const TArray<FTransform>& Transforms, const TArray<FLinearColor>& Colors) {
         if (!HISM) return;
         int32 NeededCount = Transforms.Num();
@@ -777,10 +777,13 @@ void UWorldRenderer::UpdateFastEntities()
 
         for (const FAnimalData& Animal : WorldManager->FaunaModule->Animals) {
             if (Animal.HerdSize <= 0.0f) continue;
-            FCellData Cell;
-            if (WorldManager->GetCellDataAtLocation(FVector(Animal.Position.X, Animal.Position.Y, 0), Cell)) {
+            FCellStaticData SCell; FCellDynamicData DCell;
+            int32 GX = FMath::FloorToInt(Animal.Position.X / 50.0f);
+            int32 GY = FMath::FloorToInt(Animal.Position.Y / 50.0f);
+
+            if (WorldManager->GetCellGlobal(GX, GY, SCell, DCell)) {
                 float Scale = (Animal.Type == EAnimalType::Predator) ? 1.5f : 1.0f + (Animal.HerdSize * 0.02f);
-                FVector Loc(Animal.Position.X, Animal.Position.Y, Cell.Elevation + Cell.GlacierIce + 25.0f);
+                FVector Loc(Animal.Position.X, Animal.Position.Y, SCell.Elevation + DCell.GlacierIce + 25.0f);
                 FQuat Rot = FRotationMatrix::MakeFromX(FVector(Animal.TargetDirection.X, Animal.TargetDirection.Y, 0.0f)).ToQuat();
                 Transforms.Add(FTransform(Rot, Loc, FVector(Scale)));
 
@@ -799,10 +802,13 @@ void UWorldRenderer::UpdateFastEntities()
 
         for (const FTribeData& Tribe : WorldManager->HumanModule->Tribes) {
             if (Tribe.Population <= 0) continue;
-            FCellData Cell;
-            if (WorldManager->GetCellDataAtLocation(FVector(Tribe.Position.X, Tribe.Position.Y, 0), Cell)) {
+            FCellStaticData SCell; FCellDynamicData DCell;
+            int32 GX = FMath::FloorToInt(Tribe.Position.X / 50.0f);
+            int32 GY = FMath::FloorToInt(Tribe.Position.Y / 50.0f);
+
+            if (WorldManager->GetCellGlobal(GX, GY, SCell, DCell)) {
                 float Scale = 1.0f + (Tribe.Population * 0.01f);
-                FVector Loc(Tribe.Position.X, Tribe.Position.Y, Cell.Elevation + Cell.GlacierIce + 30.0f);
+                FVector Loc(Tribe.Position.X, Tribe.Position.Y, SCell.Elevation + DCell.GlacierIce + 30.0f);
                 FVector2D Dir = (Tribe.TargetRegion - Tribe.Position).GetSafeNormal();
                 if (Dir.IsNearlyZero()) Dir = FVector2D(1, 0);
                 FQuat Rot = FRotationMatrix::MakeFromX(FVector(Dir.X, Dir.Y, 0.0f)).ToQuat();
@@ -852,15 +858,15 @@ void UWorldRenderer::UpdateSettlementEntities()
 
                 int32 GlobalX = FMath::FloorToInt(HPos.X / 50.0f);
                 int32 GlobalY = FMath::FloorToInt(HPos.Y / 50.0f);
-                const FCellData* CellPtr = nullptr;
 
-                if (!WorldManager->GetCellGlobalPtr(GlobalX, GlobalY, CellPtr)) continue;
-                if (CellPtr->SurfaceWater >= 1.0f || CellPtr->Elevation <= WorldManager->SeaLevel || CellPtr->Elevation > WorldManager->SeaLevel + 800.0f) continue;
-                if (CellPtr->GlacierIce > 0.5f) continue;
+                FCellStaticData SCell; FCellDynamicData DCell;
+                if (!WorldManager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) continue;
+                if (DCell.SurfaceWater >= 1.0f || SCell.Elevation <= WorldManager->SeaLevel || SCell.Elevation > WorldManager->SeaLevel + 800.0f) continue;
+                if (DCell.GlacierIce > 0.5f) continue;
 
                 BuiltHouses.Add(HPos);
 
-                FVector Loc(HPos.X, HPos.Y, CellPtr->Elevation);
+                FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
                 float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
                 FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
 
@@ -873,27 +879,27 @@ void UWorldRenderer::UpdateSettlementEntities()
         }
 
         for (FIntPoint Coord : City.ClaimedCells) {
-            const FCellData* CellPtr = nullptr;
-            if (WorldManager->GetCellGlobalPtr(Coord.X, Coord.Y, CellPtr)) {
-                if (CellPtr->Elevation <= WorldManager->SeaLevel || CellPtr->SurfaceWater >= 1.0f) continue;
+            FCellStaticData SCell; FCellDynamicData DCell;
+            if (WorldManager->GetCellGlobal(Coord.X, Coord.Y, SCell, DCell)) {
+                if (SCell.Elevation <= WorldManager->SeaLevel || DCell.SurfaceWater >= 1.0f) continue;
 
-                FVector Loc(Coord.X * 50.0f + 25.0f, Coord.Y * 50.0f + 25.0f, CellPtr->Elevation);
+                FVector Loc(Coord.X * 50.0f + 25.0f, Coord.Y * 50.0f + 25.0f, SCell.Elevation);
                 float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
                 FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
 
-                if (CellPtr->BuildingType == EBuildingType::Mine) {
+                if (SCell.BuildingType == EBuildingType::Mine) {
                     Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
                     Colors.Add(FLinearColor(0.2f, 0.2f, 0.2f, 1.0f));
                 }
-                else if (CellPtr->BuildingType == EBuildingType::LumberCamp) {
+                else if (SCell.BuildingType == EBuildingType::LumberCamp) {
                     Transforms.Add(FTransform(Rot, Loc, FVector(0.35f)));
                     Colors.Add(FLinearColor(0.35f, 0.20f, 0.10f, 1.0f));
                 }
-                else if (CellPtr->BuildingType == EBuildingType::Blacksmith) {
+                else if (SCell.BuildingType == EBuildingType::Blacksmith) {
                     Transforms.Add(FTransform(Rot, Loc, FVector(0.4f)));
                     Colors.Add(FLinearColor(0.3f, 0.05f, 0.05f, 1.0f));
                 }
-                else if (CellPtr->BuildingType == EBuildingType::Market) {
+                else if (SCell.BuildingType == EBuildingType::Market) {
                     Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
                     Colors.Add(FLinearColor(0.9f, 0.7f, 0.1f, 1.0f));
                 }
@@ -985,9 +991,11 @@ void UWorldRenderer::UpdateTransportEntities()
         FQuat Rot = FRotationMatrix::MakeFromX(FVector(Dir.X, Dir.Y, 0.0f)).ToQuat();
 
         if (V.Type == EVehicleType::Caravan) {
-            FCellData C;
-            if (WorldManager->GetCellDataAtLocation(FVector(V.Position.X, V.Position.Y, 0), C)) {
-                Z = C.Elevation + C.GlacierIce;
+            FCellStaticData SCell; FCellDynamicData DCell;
+            int32 GX = FMath::FloorToInt(V.Position.X / 50.0f);
+            int32 GY = FMath::FloorToInt(V.Position.Y / 50.0f);
+            if (WorldManager->GetCellGlobal(GX, GY, SCell, DCell)) {
+                Z = SCell.Elevation + DCell.GlacierIce;
             }
             CaravanTransforms.Add(FTransform(Rot, FVector(V.Position.X, V.Position.Y, Z + 10.0f), FVector(0.5f)));
             CaravanColors.Add(FLinearColor(0.6f, 0.4f, 0.2f, 1.0f));

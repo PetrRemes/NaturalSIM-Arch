@@ -128,12 +128,13 @@ public:
 	TQueue<FChunkRenderTask, EQueueMode::Mpsc> PendingRenderQueue;
 	TSet<FIntPoint> ActiveGeneratingChunks;
 
-	// OPTIMALIZACE 2: Glob·lnÌ pamÏùov˝ blok pro uloûenÌ p¯edpoËÌtan˝ch v˝öek
 	TSharedPtr<TArray<struct FPrecomputedTerrain>> GlobalTerrainCache;
 
-	bool GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellData*& OutCell, FIntPoint& OutChunkCoord);
-	bool GetCellGlobal(int32 GlobalX, int32 GlobalY, FCellData& OutCell);
-	bool GetCellGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellData*& OutCell) const;
+	// OPTIMALIZACE 4: P¯epis Getter˘ pro n·vrat Static i Dynamic struktur
+	bool GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellStaticData*& OutStatic, FCellDynamicData*& OutDynamic, FIntPoint& OutChunkCoord);
+	bool GetCellGlobal(int32 GlobalX, int32 GlobalY, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic);
+	bool GetCellStaticGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellStaticData*& OutStatic) const;
+	bool GetCellDynamicGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellDynamicData*& OutDynamic) const;
 
 	void RegisterVisualChange(FIntPoint ChunkCoord, uint8 DirtyFlag, bool bForceImmediate = false);
 	void SyncChunkEdges(const TSet<FIntPoint>& ActiveChunks);
@@ -153,7 +154,7 @@ public:
 	bool GetTribeAtLocation(FVector WorldLocation, FTribeData& OutTribe, float Radius = 100.0f);
 	bool GetSettlementAtLocation(FVector WorldLocation, FSettlementData& OutSettlement, float Radius = 200.0f);
 	bool GetAnimalAtLocation(FVector WorldLocation, FAnimalData& OutAnimal, float Radius = 100.0f);
-	bool GetCellDataAtLocation(FVector WorldLocation, FCellData& OutCell);
+	bool GetCellDataAtLocation(FVector WorldLocation, FCellStaticData& OutStatic, FCellDynamicData& OutDynamic);
 	int32 GetTotalPopulation() const;
 
 protected:

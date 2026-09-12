@@ -7,7 +7,6 @@
 UInternalPoliticsSystem::UInternalPoliticsSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UInternalPoliticsSystem::BeginPlay() { Super::BeginPlay(); }
 
-// FÁZE 3: Hashování vztahù uvnitø øíše
 static int64 GetProvinceKey(int32 ID_A, int32 ID_B) {
     int64 MinID = FMath::Min(ID_A, ID_B);
     int64 MaxID = FMath::Max(ID_A, ID_B);
@@ -101,11 +100,10 @@ void UInternalPoliticsSystem::ProcessInternalRelations(TArray<FSettlementData>& 
                 Province.Color = Province.Culture.PrimaryColor;
 
                 for (FIntPoint Coord : Province.ClaimedCells) {
-                    FCellData* C = nullptr;
-                    FIntPoint CC;
-                    if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, C, CC)) {
-                        C->OwnerNationID = -1;
-                        C->PoliticalColor = Province.Color;
+                    FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint CC;
+                    if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, SCell, DCell, CC)) {
+                        SCell->OwnerNationID = -1;
+                        SCell->PoliticalColor = Province.Color;
                         Manager->RegisterVisualChange(CC, EChunkVisualDirty::Terrain);
                     }
                 }

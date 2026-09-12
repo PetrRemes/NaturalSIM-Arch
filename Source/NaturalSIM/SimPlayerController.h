@@ -22,8 +22,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Interaction")
     void HandleMapClick();
 
+    // OPTIMALIZACE 4: Event nyní pøijímá oddìlenou statickou a dynamickou složku buòky
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
-    void OnCellSelected(FCellData CellData);
+    void OnCellSelected(FCellStaticData StaticCellData, FCellDynamicData DynamicCellData);
 
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
     void OnTribeSelected(FTribeData TribeData);
@@ -34,16 +35,11 @@ public:
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
     void OnAnimalSelected(FAnimalData AnimalData);
 
-    // NOVE: Event pro zachyceni kliknuti na marker hrozici katastrofy
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
     void OnDisasterSelected(const FDisasterWarning& DisasterData);
 
     UFUNCTION(BlueprintImplementableEvent, Category = "Interaction")
     void HideAllPanels();
-
-    // =========================================================================
-    // BOZSKE ZASAHY (UI WRAPPERY)
-    // =========================================================================
 
     UFUNCTION(BlueprintCallable, Category = "Divine Intervention")
     bool DivineAction_BoostPillar(int32 EntityID, bool bIsSettlement, ECulturalPillar Pillar);

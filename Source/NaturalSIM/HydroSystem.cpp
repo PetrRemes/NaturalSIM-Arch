@@ -8,58 +8,65 @@
 UHydroSystem::UHydroSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UHydroSystem::BeginPlay() { Super::BeginPlay(); }
 
-// OPTIMALIZACE 3: Struktura Halo Bufferu (Ghost Cells) pro eliminaci zámkù napøíè chunky
+// OPTIMALIZACE 4: FHaloBuffer pøepsán pro práci se Static a Dynamic daty
 struct FHaloBuffer {
-    TArray<FCellData> TopEdge, BotEdge, LftEdge, RgtEdge;
+    TArray<FCellStaticData> TopEdgeS, BotEdgeS, LftEdgeS, RgtEdgeS;
+    TArray<FCellDynamicData> TopEdgeD, BotEdgeD, LftEdgeD, RgtEdgeD;
     TArray<bool> HasT, HasB, HasL, HasR;
-    FCellData TL, TR, BL, BR;
+    FCellStaticData TLS, TRS, BLS, BRS;
+    FCellDynamicData TLD, TRD, BLD, BRD;
     bool HasTL = false, HasTR = false, HasBL = false, HasBR = false;
     int32 CSize = 0, CS = 0, BaseGX = 0, BaseGY = 0;
 
     void Fetch(ASimWorldManager* Manager, FIntPoint Coord, int32 InCSize, int32 InCS) {
         CSize = InCSize; CS = InCS;
         BaseGX = Coord.X * CSize; BaseGY = Coord.Y * CSize;
-        TopEdge.SetNumUninitialized(CSize); BotEdge.SetNumUninitialized(CSize);
-        LftEdge.SetNumUninitialized(CSize); RgtEdge.SetNumUninitialized(CSize);
+        TopEdgeS.SetNumUninitialized(CSize); BotEdgeS.SetNumUninitialized(CSize);
+        LftEdgeS.SetNumUninitialized(CSize); RgtEdgeS.SetNumUninitialized(CSize);
+        TopEdgeD.SetNumUninitialized(CSize); BotEdgeD.SetNumUninitialized(CSize);
+        LftEdgeD.SetNumUninitialized(CSize); RgtEdgeD.SetNumUninitialized(CSize);
         HasT.Init(false, CSize); HasB.Init(false, CSize); HasL.Init(false, CSize); HasR.Init(false, CSize);
 
         for (int x = 0; x < CSize; x++) {
-            const FCellData* c;
-            HasT[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY - 1, c); if (HasT[x]) TopEdge[x] = *c;
-            HasB[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY + CSize, c); if (HasB[x]) BotEdge[x] = *c;
+            HasT[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY - 1, TopEdgeS[x], TopEdgeD[x]);
+            HasB[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY + CSize, BotEdgeS[x], BotEdgeD[x]);
         }
         for (int y = 0; y < CSize; y++) {
-            const FCellData* c;
-            HasL[y] = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + y, c); if (HasL[y]) LftEdge[y] = *c;
-            HasR[y] = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + y, c); if (HasR[y]) RgtEdge[y] = *c;
+            HasL[y] = Manager->GetCellGlobal(BaseGX - 1, BaseGY + y, LftEdgeS[y], LftEdgeD[y]);
+            HasR[y] = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + y, RgtEdgeS[y], RgtEdgeD[y]);
         }
-        const FCellData* cor;
-        HasTL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY - 1, cor); if (HasTL) TL = *cor;
-        HasTR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY - 1, cor); if (HasTR) TR = *cor;
-        HasBL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + CSize, cor); if (HasBL) BL = *cor;
-        HasBR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + CSize, cor); if (HasBR) BR = *cor;
+        HasTL = Manager->GetCellGlobal(BaseGX - 1, BaseGY - 1, TLS, TLD);
+        HasTR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY - 1, TRS, TRD);
+        HasBL = Manager->GetCellGlobal(BaseGX - 1, BaseGY + CSize, BLS, BLD);
+        HasBR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + CSize, BRS, BRD);
     }
 
-    const FCellData* GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager) {
-        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) return &Chunk.MicroCells[lx + ly * CS];
+    void GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
+        OutS = nullptr; OutD = nullptr;
+        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
+            int32 Idx = lx + ly * CS;
+            OutS = &Chunk.StaticCells[Idx];
+            OutD = &Chunk.DynamicCells[Idx];
+            return;
+        }
         if (lx >= -1 && lx <= CSize && ly >= -1 && ly <= CSize) {
             if (ly < 0) {
-                if (lx < 0) return HasTL ? &TL : nullptr;
-                if (lx == CSize) return HasTR ? &TR : nullptr;
-                return HasT[lx] ? &TopEdge[lx] : nullptr;
+                if (lx < 0) { if (HasTL) { OutS = &TLS; OutD = &TLD; } return; }
+                if (lx == CSize) { if (HasTR) { OutS = &TRS; OutD = &TRD; } return; }
+                if (HasT[lx]) { OutS = &TopEdgeS[lx]; OutD = &TopEdgeD[lx]; } return;
             }
             if (ly == CSize) {
-                if (lx < 0) return HasBL ? &BL : nullptr;
-                if (lx == CSize) return HasBR ? &BR : nullptr;
-                return HasB[lx] ? &BotEdge[lx] : nullptr;
+                if (lx < 0) { if (HasBL) { OutS = &BLS; OutD = &BLD; } return; }
+                if (lx == CSize) { if (HasBR) { OutS = &BRS; OutD = &BRD; } return; }
+                if (HasB[lx]) { OutS = &BotEdgeS[lx]; OutD = &BotEdgeD[lx]; } return;
             }
-            if (lx < 0) return HasL[ly] ? &LftEdge[ly] : nullptr;
-            if (lx == CSize) return HasR[ly] ? &RgtEdge[ly] : nullptr;
+            if (lx < 0) { if (HasL[ly]) { OutS = &LftEdgeS[ly]; OutD = &LftEdgeD[ly]; } return; }
+            if (lx == CSize) { if (HasR[ly]) { OutS = &RgtEdgeS[ly]; OutD = &RgtEdgeD[ly]; } return; }
         }
-        // Záložní vrstva (radius 2) pro výpoèty dynamiky a meandrù
-        const FCellData* Fallback = nullptr;
-        Manager->GetCellGlobalPtr(BaseGX + lx, BaseGY + ly, Fallback);
-        return Fallback;
+        FIntPoint DummyCoord;
+        FCellStaticData* S = nullptr; FCellDynamicData* D = nullptr;
+        Manager->GetMutableCellGlobal(BaseGX + lx, BaseGY + ly, S, D, DummyCoord);
+        OutS = S; OutD = D;
     }
 };
 
@@ -83,47 +90,50 @@ void UHydroSystem::ProcessChunkWater(FChunkData& OutChunk, FVector2D ChunkCoord,
     ParallelFor(ChunkSize, [&](int32 Y) {
         for (int32 X = 0; X < ChunkSize; X++) {
             int32 i = X + Y * ChunkSize;
-            if (i >= OutChunk.MicroCells.Num()) continue;
+            if (i >= OutChunk.StaticCells.Num()) continue;
+
+            FCellStaticData& SCell = OutChunk.StaticCells[i];
+            FCellDynamicData& DCell = OutChunk.DynamicCells[i];
 
             float GlobalX = (ChunkCoord.X * (ChunkSize - 1)) + X;
             float GlobalY = (ChunkCoord.Y * (ChunkSize - 1)) + Y;
 
             if (Params.bIsFullGeneration) {
-                OutChunk.MicroCells[i].SurfaceWater = 0.0f;
-                OutChunk.MicroCells[i].WaterInflowBuffer = 0.0f;
-                OutChunk.MicroCells[i].RiverDischarge = 0.0f;
-                OutChunk.MicroCells[i].RiverDischargeBuffer = 0.0f;
-                OutChunk.MicroCells[i].FlowPersistenceBuffer = 0.0f;
-                OutChunk.MicroCells[i].ChannelWidth = 0.0f;
-                OutChunk.MicroCells[i].ChannelDepth = 0.0f;
-                OutChunk.MicroCells[i].BankHeight = 0.0f;
-                OutChunk.MicroCells[i].WaterType = EWaterType::None;
-                OutChunk.MicroCells[i].bIsSpring = false;
-                OutChunk.MicroCells[i].SpringStrength = 0.0f;
-                OutChunk.MicroCells[i].FlowDirectionGlobalX = -1;
-                OutChunk.MicroCells[i].FlowDirectionGlobalY = -1;
-                OutChunk.MicroCells[i].DepositedSediment = 0.0f;
-                OutChunk.MicroCells[i].SoilStability = 0.0f;
-                OutChunk.MicroCells[i].WetlandScore = 0.0f;
+                DCell.SurfaceWater = 0.0f;
+                DCell.WaterInflowBuffer = 0.0f;
+                DCell.RiverDischarge = 0.0f;
+                DCell.RiverDischargeBuffer = 0.0f;
+                DCell.FlowPersistenceBuffer = 0.0f;
+                SCell.ChannelWidth = 0.0f;
+                SCell.ChannelDepth = 0.0f;
+                SCell.BankHeight = 0.0f;
+                SCell.WaterType = EWaterType::None;
+                SCell.bIsSpring = false;
+                SCell.SpringStrength = 0.0f;
+                SCell.FlowDirectionGlobalX = -1;
+                SCell.FlowDirectionGlobalY = -1;
+                DCell.DepositedSediment = 0.0f;
+                DCell.SoilStability = 0.0f;
+                DCell.WetlandScore = 0.0f;
 
-                if (OutChunk.MicroCells[i].Elevation <= SeaLevel) {
-                    OutChunk.MicroCells[i].WaterType = EWaterType::Ocean;
-                    OutChunk.MicroCells[i].SurfaceWater = SeaLevel - OutChunk.MicroCells[i].Elevation;
+                if (SCell.Elevation <= SeaLevel) {
+                    SCell.WaterType = EWaterType::Ocean;
+                    DCell.SurfaceWater = SeaLevel - SCell.Elevation;
                 }
                 else {
-                    OutChunk.MicroCells[i].GroundWater = (OutChunk.MicroCells[i].Rainfall * 100.0f);
+                    DCell.GroundWater = (DCell.Rainfall * 100.0f);
 
                     float SpringNoise = FMath::PerlinNoise2D(FVector2D(GlobalX * 0.1f, GlobalY * 0.1f));
-                    if (OutChunk.MicroCells[i].Elevation > SeaLevel + 200.0f && OutChunk.MicroCells[i].GroundWater > 50.0f && SpringNoise > 0.85f) {
-                        OutChunk.MicroCells[i].bIsSpring = true;
-                        OutChunk.MicroCells[i].SpringStrength = FMath::FRandRange(0.5f, 2.0f);
-                        OutChunk.MicroCells[i].WaterType = EWaterType::Spring;
+                    if (SCell.Elevation > SeaLevel + 200.0f && DCell.GroundWater > 50.0f && SpringNoise > 0.85f) {
+                        SCell.bIsSpring = true;
+                        SCell.SpringStrength = FMath::FRandRange(0.5f, 2.0f);
+                        SCell.WaterType = EWaterType::Spring;
                     }
                 }
             }
             else {
-                if (OutChunk.MicroCells[i].Elevation > SeaLevel) {
-                    OutChunk.MicroCells[i].GroundWater = FMath::Clamp(OutChunk.MicroCells[i].GroundWater + (OutChunk.MicroCells[i].Rainfall * Params.RainfallMultiplier), 0.0f, 100.0f);
+                if (SCell.Elevation > SeaLevel) {
+                    DCell.GroundWater = FMath::Clamp(DCell.GroundWater + (DCell.Rainfall * Params.RainfallMultiplier), 0.0f, 100.0f);
                 }
             }
         }
@@ -166,9 +176,9 @@ void UHydroSystem::ProcessChunkWater(FChunkData& OutChunk, FVector2D ChunkCoord,
                     int32 localY = ry - (FMath::RoundToInt(ChunkCoord.Y) * (ChunkSize - 1));
                     if (localX >= 0 && localX < ChunkSize && localY >= 0 && localY < ChunkSize) {
                         int32 Idx = localX + localY * ChunkSize;
-                        OutChunk.MicroCells[Idx].bIsSpring = true;
-                        OutChunk.MicroCells[Idx].SpringStrength = NewRiver.Volume * 1.5f;
-                        OutChunk.MicroCells[Idx].WaterType = EWaterType::Spring;
+                        OutChunk.StaticCells[Idx].bIsSpring = true;
+                        OutChunk.StaticCells[Idx].SpringStrength = NewRiver.Volume * 1.5f;
+                        OutChunk.StaticCells[Idx].WaterType = EWaterType::Spring;
                     }
 
                     Spawned++;
@@ -219,18 +229,18 @@ void UHydroSystem::ProcessChunkWater(FChunkData& OutChunk, FVector2D ChunkCoord,
                             if (centerDist > BaseCarveRadius + 0.5f) continue;
 
                             float waterAmount = FMath::Max(0.0f, (BaseCarveRadius + 0.5f - centerDist) * 5.0f * River.Volume);
-                            OutChunk.MicroCells[Idx].SurfaceWater += waterAmount;
+                            OutChunk.DynamicCells[Idx].SurfaceWater += waterAmount;
 
-                            if (OutChunk.MicroCells[Idx].Elevation > SeaLevel) {
+                            if (OutChunk.StaticCells[Idx].Elevation > SeaLevel) {
                                 float carveAlpha = FMath::Clamp(1.0f - (centerDist / (BaseCarveRadius + 0.5f)), 0.0f, 1.0f);
                                 float CarveDepth = FMath::Lerp(12.0f, 4.0f, LowlandAlpha);
                                 float targetRiverZ = FMath::Max(SeaLevel, CurrElev - CarveDepth);
-                                float originalZ = OutChunk.MicroCells[Idx].Elevation;
+                                float originalZ = OutChunk.StaticCells[Idx].Elevation;
 
                                 if (originalZ > targetRiverZ) {
                                     float profileExp = FMath::Lerp(1.5f, 3.0f, LowlandAlpha);
                                     float finalAlpha = FMath::Pow(carveAlpha, profileExp) * Params.ErosionMultiplier;
-                                    OutChunk.MicroCells[Idx].Elevation = FMath::Lerp(originalZ, targetRiverZ, finalAlpha);
+                                    OutChunk.StaticCells[Idx].Elevation = FMath::Lerp(originalZ, targetRiverZ, finalAlpha);
                                 }
                             }
                         }
@@ -323,18 +333,18 @@ void UHydroSystem::ProcessChunkWater(FChunkData& OutChunk, FVector2D ChunkCoord,
 
                                         if (locX >= 0 && locX < ChunkSize && locY >= 0 && locY < ChunkSize) {
                                             int32 Idx = locX + locY * ChunkSize;
-                                            float originalZ = OutChunk.MicroCells[Idx].Elevation;
+                                            float originalZ = OutChunk.StaticCells[Idx].Elevation;
 
                                             if (dist <= effRadius) {
-                                                OutChunk.MicroCells[Idx].SurfaceWater += 15.0f;
+                                                OutChunk.DynamicCells[Idx].SurfaceWater += 15.0f;
                                                 float depthAlpha = dist / effRadius;
                                                 float lakeBedZ = FMath::Max(SeaLevel, CurrElev - FMath::Lerp(12.0f, 2.0f, depthAlpha));
-                                                OutChunk.MicroCells[Idx].Elevation = FMath::Min(originalZ, lakeBedZ);
+                                                OutChunk.StaticCells[Idx].Elevation = FMath::Min(originalZ, lakeBedZ);
                                             }
                                             else {
                                                 float shoreAlpha = (dist - effRadius) / (shoreRadius - effRadius);
                                                 float blend = FMath::SmoothStep(0.0f, 1.0f, shoreAlpha);
-                                                OutChunk.MicroCells[Idx].Elevation = FMath::Min(originalZ, FMath::Lerp(CurrElev, originalZ, blend));
+                                                OutChunk.StaticCells[Idx].Elevation = FMath::Min(originalZ, FMath::Lerp(CurrElev, originalZ, blend));
                                             }
                                         }
                                     }
@@ -378,9 +388,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
     int32 GlobalStart = 0;
     int32 GlobalEnd = ChunkKeys.Num();
 
-    // ----------------------------------------------------
-    // FÁZE 1: FLOW DIRECTION (Smìrování vody)
-    // ----------------------------------------------------
     ParallelFor(GlobalEnd, [&](int32 idx) {
         FIntPoint Coord = ChunkKeys[idx];
         if (!WorldChunks.Contains(Coord)) return;
@@ -392,79 +399,82 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
-                FCellData& Cell = Chunk.MicroCells[i];
+                FCellStaticData& SCell = Chunk.StaticCells[i];
+                FCellDynamicData& DCell = Chunk.DynamicCells[i];
                 int32 GlobalX = (Coord.X * CSize) + X;
                 int32 GlobalY = (Coord.Y * CSize) + Y;
 
-                auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                    return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
+                auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
+                    Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
                     };
 
-                if (Cell.Elevation <= Manager->SeaLevel) {
-                    Cell.WaterType = EWaterType::Ocean;
-                    Cell.SurfaceWater = Manager->SeaLevel - Cell.Elevation;
+                if (SCell.Elevation <= Manager->SeaLevel) {
+                    SCell.WaterType = EWaterType::Ocean;
+                    DCell.SurfaceWater = Manager->SeaLevel - SCell.Elevation;
 
-                    float LowestHead = Cell.Elevation;
+                    float LowestHead = SCell.Elevation;
                     int32 LowestGlobalX = -1;
                     int32 LowestGlobalY = -1;
 
                     for (int32 n = 0; n < 8; n++) {
-                        const FCellData* NCell = GetNeighbor(Offsets[n][0], Offsets[n][1]);
-                        if (NCell && NCell->Elevation < LowestHead) {
-                            LowestHead = NCell->Elevation;
+                        const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
+                        GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+                        if (NCellS && NCellS->Elevation < LowestHead) {
+                            LowestHead = NCellS->Elevation;
                             LowestGlobalX = GlobalX + Offsets[n][0];
                             LowestGlobalY = GlobalY + Offsets[n][1];
                         }
                     }
-                    Cell.FlowDirectionGlobalX = LowestGlobalX;
-                    Cell.FlowDirectionGlobalY = LowestGlobalY;
-                    Cell.WaterFlow = 1.0f;
+                    SCell.FlowDirectionGlobalX = LowestGlobalX;
+                    SCell.FlowDirectionGlobalY = LowestGlobalY;
+                    DCell.WaterFlow = 1.0f;
                     continue;
                 }
 
                 float RechargeFactor = 0.4f;
-                if (Cell.Bedrock == EBedrockType::Sand) RechargeFactor = 0.8f;
-                else if (Cell.Bedrock == EBedrockType::Rock) RechargeFactor = 0.1f;
+                if (SCell.Bedrock == EBedrockType::Sand) RechargeFactor = 0.8f;
+                else if (SCell.Bedrock == EBedrockType::Rock) RechargeFactor = 0.1f;
 
                 float GroundwaterBaseLoss = 0.05f;
-                float InfiltratedWater = Cell.Rainfall * RechargeFactor;
-                float NewGroundWater = Cell.GroundWater + InfiltratedWater - GroundwaterBaseLoss;
+                float InfiltratedWater = DCell.Rainfall * RechargeFactor;
+                float NewGroundWater = DCell.GroundWater + InfiltratedWater - GroundwaterBaseLoss;
 
                 if (NewGroundWater > 100.0f) {
                     float ExcessWater = NewGroundWater - 100.0f;
-                    Cell.SurfaceWater += ExcessWater;
-                    Cell.GroundWater = 100.0f;
+                    DCell.SurfaceWater += ExcessWater;
+                    DCell.GroundWater = 100.0f;
                 }
                 else {
-                    Cell.GroundWater = FMath::Max(0.0f, NewGroundWater);
+                    DCell.GroundWater = FMath::Max(0.0f, NewGroundWater);
                 }
 
-                if (Cell.bIsSpring) {
-                    Cell.WaterType = EWaterType::Spring;
+                if (SCell.bIsSpring) {
+                    SCell.WaterType = EWaterType::Spring;
                 }
-                else if (Cell.SurfaceWater > 0.5f && Cell.FlowDirectionGlobalX == -1) {
-                    Cell.WaterType = EWaterType::Lake;
+                else if (DCell.SurfaceWater > 0.5f && SCell.FlowDirectionGlobalX == -1) {
+                    SCell.WaterType = EWaterType::Lake;
                 }
-                else if (Cell.RiverDischarge > 0.2f) {
-                    Cell.WaterType = EWaterType::River;
+                else if (DCell.RiverDischarge > 0.2f) {
+                    SCell.WaterType = EWaterType::River;
                 }
-                else if (Cell.SurfaceWater > 0.05f) {
-                    Cell.WaterType = EWaterType::Surface;
+                else if (DCell.SurfaceWater > 0.05f) {
+                    SCell.WaterType = EWaterType::Surface;
                 }
                 else {
-                    Cell.WaterType = EWaterType::None;
+                    SCell.WaterType = EWaterType::None;
                 }
 
-                if (Cell.SurfaceWater > 0.01f || Cell.bIsSpring) {
-                    float MyHead = Cell.Elevation + Cell.SurfaceWater;
+                if (DCell.SurfaceWater > 0.01f || SCell.bIsSpring) {
+                    float MyHead = SCell.Elevation + DCell.SurfaceWater;
                     float LowestHead = MyHead;
                     int32 LowestGlobalX = -1;
                     int32 LowestGlobalY = -1;
 
                     for (int32 n = 0; n < 8; n++) {
-                        const FCellData* NCell = GetNeighbor(Offsets[n][0], Offsets[n][1]);
-                        if (NCell) {
-                            float nHead = NCell->Elevation + NCell->SurfaceWater;
+                        const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
+                        GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+                        if (NCellS && NCellD) {
+                            float nHead = NCellS->Elevation + NCellD->SurfaceWater;
                             if (nHead < LowestHead) {
                                 LowestHead = nHead;
                                 LowestGlobalX = GlobalX + Offsets[n][0];
@@ -473,12 +483,12 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                         }
                     }
 
-                    Cell.FlowDirectionGlobalX = LowestGlobalX;
-                    Cell.FlowDirectionGlobalY = LowestGlobalY;
+                    SCell.FlowDirectionGlobalX = LowestGlobalX;
+                    SCell.FlowDirectionGlobalY = LowestGlobalY;
                 }
                 else {
-                    Cell.FlowDirectionGlobalX = -1;
-                    Cell.FlowDirectionGlobalY = -1;
+                    SCell.FlowDirectionGlobalX = -1;
+                    SCell.FlowDirectionGlobalY = -1;
                 }
             }
         }
@@ -486,9 +496,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
     const float FlowCoefficient = 0.18f;
 
-    // ----------------------------------------------------
-    // FÁZE 2: WATER TRANSFER (Pøenos vody a síly proudu)
-    // ----------------------------------------------------
     ParallelFor(GlobalEnd, [&](int32 idx) {
         FIntPoint Coord = ChunkKeys[idx];
         if (!WorldChunks.Contains(Coord)) return;
@@ -502,79 +509,85 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
-                FCellData& Cell = Chunk.MicroCells[i];
-                if (Cell.WaterType == EWaterType::Ocean) continue;
+                FCellStaticData& SCell = Chunk.StaticCells[i];
+                FCellDynamicData& DCell = Chunk.DynamicCells[i];
+
+                if (SCell.WaterType == EWaterType::Ocean) continue;
 
                 int32 GlobalX = (Coord.X * CSize) + X;
                 int32 GlobalY = (Coord.Y * CSize) + Y;
 
-                auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                    return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
+                auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
+                    Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
                     };
 
                 float SpringInput = 0.0f;
-                if (Cell.bIsSpring) {
-                    float GroundFactor = FMath::Clamp(Cell.GroundWater / 100.0f, 0.25f, 1.0f);
-                    SpringInput = Cell.SpringStrength * GroundFactor;
-                    Cell.GroundWater = FMath::Max(0.0f, Cell.GroundWater - SpringInput);
-                    Cell.SurfaceWater = FMath::Max(Cell.SurfaceWater, SpringInput);
+                if (SCell.bIsSpring) {
+                    float GroundFactor = FMath::Clamp(DCell.GroundWater / 100.0f, 0.25f, 1.0f);
+                    SpringInput = SCell.SpringStrength * GroundFactor;
+                    DCell.GroundWater = FMath::Max(0.0f, DCell.GroundWater - SpringInput);
+                    DCell.SurfaceWater = FMath::Max(DCell.SurfaceWater, SpringInput);
                 }
 
                 float MyOutflow = 0.0f;
-                if (Cell.FlowDirectionGlobalX != -1 && Cell.FlowDirectionGlobalY != -1) {
-                    int32 FlowDX = Cell.FlowDirectionGlobalX - GlobalX;
-                    int32 FlowDY = Cell.FlowDirectionGlobalY - GlobalY;
-                    const FCellData* TargetCell = GetNeighbor(FlowDX, FlowDY);
+                if (SCell.FlowDirectionGlobalX != -1 && SCell.FlowDirectionGlobalY != -1) {
+                    int32 FlowDX = SCell.FlowDirectionGlobalX - GlobalX;
+                    int32 FlowDY = SCell.FlowDirectionGlobalY - GlobalY;
 
-                    if (TargetCell) {
-                        float Diff = (Cell.Elevation + Cell.SurfaceWater) - (TargetCell->Elevation + TargetCell->SurfaceWater);
+                    const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
+                    GetNeighbor(FlowDX, FlowDY, TargetCellS, TargetCellD);
+
+                    if (TargetCellS && TargetCellD) {
+                        float Diff = (SCell.Elevation + DCell.SurfaceWater) - (TargetCellS->Elevation + TargetCellD->SurfaceWater);
                         if (Diff > 0.0f) {
                             float MaxTransfer = Diff * 0.25f;
                             float DesiredTransfer = Diff * LocalFlowCoefficient;
-                            if (Cell.WaterType == EWaterType::River || Cell.WaterType == EWaterType::Spring || Cell.RiverDischarge > 0.5f || Chunk.bGeomorphologyDirty) {
+                            if (SCell.WaterType == EWaterType::River || SCell.WaterType == EWaterType::Spring || DCell.RiverDischarge > 0.5f || Chunk.bGeomorphologyDirty) {
                                 DesiredTransfer = Diff * (Chunk.bGeomorphologyDirty ? 0.8f : 0.25f);
                             }
-                            MyOutflow = FMath::Min(Cell.SurfaceWater, FMath::Min(DesiredTransfer, MaxTransfer));
+                            MyOutflow = FMath::Min(DCell.SurfaceWater, FMath::Min(DesiredTransfer, MaxTransfer));
                         }
                     }
                 }
 
                 float MyInflow = 0.0f;
                 for (int32 n = 0; n < 8; n++) {
-                    const FCellData* NCell = GetNeighbor(Offsets[n][0], Offsets[n][1]);
-                    if (NCell) {
-                        if (NCell->WaterType != EWaterType::Ocean && NCell->FlowDirectionGlobalX == GlobalX && NCell->FlowDirectionGlobalY == GlobalY) {
-                            float Diff = (NCell->Elevation + NCell->SurfaceWater) - (Cell.Elevation + Cell.SurfaceWater);
+                    const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
+                    GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+
+                    if (NCellS && NCellD) {
+                        if (NCellS->WaterType != EWaterType::Ocean && NCellS->FlowDirectionGlobalX == GlobalX && NCellS->FlowDirectionGlobalY == GlobalY) {
+                            float Diff = (NCellS->Elevation + NCellD->SurfaceWater) - (SCell.Elevation + DCell.SurfaceWater);
                             if (Diff > 0.0f) {
                                 float MaxTransfer = Diff * 0.25f;
                                 float DesiredTransfer = Diff * LocalFlowCoefficient;
-                                if (NCell->WaterType == EWaterType::River || NCell->WaterType == EWaterType::Spring || NCell->RiverDischarge > 0.5f || Chunk.bGeomorphologyDirty) {
+                                if (NCellS->WaterType == EWaterType::River || NCellS->WaterType == EWaterType::Spring || NCellD->RiverDischarge > 0.5f || Chunk.bGeomorphologyDirty) {
                                     DesiredTransfer = Diff * (Chunk.bGeomorphologyDirty ? 0.8f : 0.25f);
                                 }
-                                MyInflow += FMath::Min(NCell->SurfaceWater, FMath::Min(DesiredTransfer, MaxTransfer));
+                                MyInflow += FMath::Min(NCellD->SurfaceWater, FMath::Min(DesiredTransfer, MaxTransfer));
                             }
                         }
                     }
                 }
 
-                float NextWater = Cell.SurfaceWater - MyOutflow + MyInflow + SpringInput;
+                float NextWater = DCell.SurfaceWater - MyOutflow + MyInflow + SpringInput;
                 NextWater = FMath::Max(0.0f, NextWater - 0.0005f);
 
-                Cell.WaterInflowBuffer = NextWater;
-                Cell.WaterFlow = FMath::Lerp(Cell.WaterFlow, MyOutflow, 0.15f);
+                DCell.WaterInflowBuffer = NextWater;
+                DCell.WaterFlow = FMath::Lerp(DCell.WaterFlow, MyOutflow, 0.15f);
 
-                if (Cell.WaterFlow > 0.1f) {
-                    Cell.FlowPersistenceBuffer = FMath::Min(1.0f, Cell.FlowPersistence + 0.01f);
+                if (DCell.WaterFlow > 0.1f) {
+                    DCell.FlowPersistenceBuffer = FMath::Min(1.0f, DCell.FlowPersistence + 0.01f);
                 }
                 else {
-                    Cell.FlowPersistenceBuffer = FMath::Max(0.0f, Cell.FlowPersistence - 0.005f);
+                    DCell.FlowPersistenceBuffer = FMath::Max(0.0f, DCell.FlowPersistence - 0.005f);
                 }
 
                 float TargetDischarge = MyOutflow + MyInflow;
-                Cell.RiverDischargeBuffer = FMath::Lerp(Cell.RiverDischarge, TargetDischarge, 0.05f);
+                DCell.RiverDischargeBuffer = FMath::Lerp(DCell.RiverDischarge, TargetDischarge, 0.05f);
 
-                if (FMath::Abs(Cell.SurfaceWater - NextWater) > 0.5f) {
-                    Chunk.AccumulatedWaterChange += FMath::Abs(Cell.SurfaceWater - NextWater);
+                if (FMath::Abs(DCell.SurfaceWater - NextWater) > 0.5f) {
+                    Chunk.AccumulatedWaterChange += FMath::Abs(DCell.SurfaceWater - NextWater);
                 }
             }
         }
@@ -588,10 +601,10 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
-                Chunk.MicroCells[i].SurfaceWater = Chunk.MicroCells[i].WaterInflowBuffer;
-                Chunk.MicroCells[i].RiverDischarge = Chunk.MicroCells[i].RiverDischargeBuffer;
-                Chunk.MicroCells[i].FlowPersistence = Chunk.MicroCells[i].FlowPersistenceBuffer;
-                Chunk.MicroCells[i].WaterInflowBuffer = 0.0f;
+                Chunk.DynamicCells[i].SurfaceWater = Chunk.DynamicCells[i].WaterInflowBuffer;
+                Chunk.DynamicCells[i].RiverDischarge = Chunk.DynamicCells[i].RiverDischargeBuffer;
+                Chunk.DynamicCells[i].FlowPersistence = Chunk.DynamicCells[i].FlowPersistenceBuffer;
+                Chunk.DynamicCells[i].WaterInflowBuffer = 0.0f;
             }
         }
 
@@ -608,9 +621,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         TArray<uint8> SafeFlags;
         SafeFlags.Init(0, GlobalEnd);
 
-        // ----------------------------------------------------
-        // FÁZE 4: GEOMORPHOLOGY (Vodní eroze a naplaveniny)
-        // ----------------------------------------------------
         ParallelFor(GlobalEnd, [&](int32 idx) {
             FIntPoint Coord = ChunkKeys[idx];
             if (!WorldChunks.Contains(Coord)) return;
@@ -622,68 +632,73 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
                     int32 i = X + Y * Manager->ChunkSize;
-                    FCellData& Cell = Chunk.MicroCells[i];
+                    FCellStaticData& SCell = Chunk.StaticCells[i];
+                    FCellDynamicData& DCell = Chunk.DynamicCells[i];
+
                     int32 GlobalX = (Coord.X * CSize) + X; int32 GlobalY = (Coord.Y * CSize) + Y;
 
-                    auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                        return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
+                    auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
+                        Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
                         };
 
-                    if (Cell.WaterType == EWaterType::Ocean || Cell.Elevation <= Manager->SeaLevel) {
-                        if (Cell.Sediment > 0.01f) {
+                    if (SCell.WaterType == EWaterType::Ocean || SCell.Elevation <= Manager->SeaLevel) {
+                        if (DCell.Sediment > 0.01f) {
                             float DepositRate = FMath::Clamp(2.0f - TidalMultiplier, 0.05f, 0.5f) * 0.15f;
-                            float OceanDeposit = Cell.Sediment * DepositRate * DeltaDays;
+                            float OceanDeposit = DCell.Sediment * DepositRate * DeltaDays;
 
-                            float SpaceToSeaLevel = Manager->SeaLevel - Cell.Elevation;
+                            float SpaceToSeaLevel = Manager->SeaLevel - SCell.Elevation;
                             float MaxAllowedDeposit = FMath::Max(0.0f, SpaceToSeaLevel + 0.15f);
                             float ActualDeposit = FMath::Min(OceanDeposit, MaxAllowedDeposit);
 
-                            Cell.ElevationDelta += ActualDeposit;
-                            Cell.DepositedSediment += ActualDeposit;
-                            Cell.SedimentDelta -= ActualDeposit;
+                            DCell.ElevationDelta += ActualDeposit;
+                            DCell.DepositedSediment += ActualDeposit;
+                            DCell.SedimentDelta -= ActualDeposit;
                             Chunk.AccumulatedTerrainChange += ActualDeposit;
 
-                            if (Cell.Elevation + Cell.ElevationDelta > Manager->SeaLevel) {
-                                Cell.WaterType = EWaterType::Surface;
-                                Cell.Bedrock = EBedrockType::Sand;
-                                Cell.SoilType = ESoilType::Sand;
+                            if (SCell.Elevation + DCell.ElevationDelta > Manager->SeaLevel) {
+                                SCell.WaterType = EWaterType::Surface;
+                                SCell.Bedrock = EBedrockType::Sand;
+                                SCell.SoilType = ESoilType::Sand;
                                 SafeFlags[idx] |= EChunkVisualDirty::Flora | EChunkVisualDirty::Terrain;
                             }
                         }
 
                         float MySedimentOutflow = 0.0f;
-                        if (Cell.FlowDirectionGlobalX != -1) {
-                            MySedimentOutflow = FMath::Min(Cell.Sediment + Cell.SedimentDelta, Cell.WaterFlow * 0.9f * DeltaDays);
+                        if (SCell.FlowDirectionGlobalX != -1) {
+                            MySedimentOutflow = FMath::Min(DCell.Sediment + DCell.SedimentDelta, DCell.WaterFlow * 0.9f * DeltaDays);
                         }
-                        Cell.SedimentDelta -= MySedimentOutflow;
+                        DCell.SedimentDelta -= MySedimentOutflow;
                         continue;
                     }
 
-                    bool bIsFlooding = Cell.SurfaceWater > (Cell.ChannelDepth + Cell.BankHeight + 0.2f);
-                    float MaterialResistance = (Cell.Bedrock == EBedrockType::Sand) ? 0.5f : ((Cell.Bedrock == EBedrockType::Rock) ? 50.0f : 1.0f);
+                    bool bIsFlooding = DCell.SurfaceWater > (SCell.ChannelDepth + SCell.BankHeight + 0.2f);
+                    float MaterialResistance = (SCell.Bedrock == EBedrockType::Sand) ? 0.5f : ((SCell.Bedrock == EBedrockType::Rock) ? 50.0f : 1.0f);
 
-                    if (Cell.SurfaceWater < 0.1f && !bIsFlooding) {
+                    if (DCell.SurfaceWater < 0.1f && !bIsFlooding) {
                         float BankErosion = 0.0f;
                         float BankDeposition = 0.0f;
 
                         for (int32 n = 0; n < 8; n++) {
                             int32 NX = GlobalX + Offsets[n][0]; int32 NY = GlobalY + Offsets[n][1];
-                            const FCellData* NCell = GetNeighbor(Offsets[n][0], Offsets[n][1]);
+                            const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
+                            GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
 
-                            if (NCell && NCell->RiverDischarge > 1.0f && NCell->SurfaceWater > 0.1f) {
+                            if (NCellS && NCellD && NCellD->RiverDischarge > 1.0f && NCellD->SurfaceWater > 0.1f) {
                                 FVector2D DirToMe(-Offsets[n][0], -Offsets[n][1]); DirToMe.Normalize();
                                 FVector2D NOutflow(0, 0);
-                                if (NCell->FlowDirectionGlobalX != -1) {
-                                    NOutflow = FVector2D(NCell->FlowDirectionGlobalX - NX, NCell->FlowDirectionGlobalY - NY).GetSafeNormal();
+                                if (NCellS->FlowDirectionGlobalX != -1) {
+                                    NOutflow = FVector2D(NCellS->FlowDirectionGlobalX - NX, NCellS->FlowDirectionGlobalY - NY).GetSafeNormal();
                                 }
 
                                 if (FVector2D::DotProduct(NOutflow, DirToMe) < 0.5f) {
                                     FVector2D NInflowMom(0, 0);
                                     for (int32 nn = 0; nn < 8; nn++) {
                                         int32 relDX = Offsets[n][0] + Offsets[nn][0]; int32 relDY = Offsets[n][1] + Offsets[nn][1];
-                                        const FCellData* UpstreamCell = GetNeighbor(relDX, relDY);
-                                        if (UpstreamCell && UpstreamCell->FlowDirectionGlobalX == NX && UpstreamCell->FlowDirectionGlobalY == NY) {
-                                            NInflowMom += FVector2D(-Offsets[nn][0], -Offsets[nn][1]) * UpstreamCell->WaterFlow;
+                                        const FCellStaticData* UpstreamS = nullptr; const FCellDynamicData* UpstreamD = nullptr;
+                                        GetNeighbor(relDX, relDY, UpstreamS, UpstreamD);
+
+                                        if (UpstreamS && UpstreamD && UpstreamS->FlowDirectionGlobalX == NX && UpstreamS->FlowDirectionGlobalY == NY) {
+                                            NInflowMom += FVector2D(-Offsets[nn][0], -Offsets[nn][1]) * UpstreamD->WaterFlow;
                                         }
                                     }
 
@@ -691,8 +706,8 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                                         NInflowMom.Normalize();
                                         float HitDot = FVector2D::DotProduct(NInflowMom, DirToMe);
 
-                                        if (HitDot > 0.6f) BankErosion += NCell->RiverDischarge * HitDot * 0.002f * DeltaDays * Manager->ErosionMultiplier;
-                                        else if (HitDot < -0.4f && NCell->Sediment > 0.1f) BankDeposition += NCell->Sediment * 0.02f * DeltaDays;
+                                        if (HitDot > 0.6f) BankErosion += NCellD->RiverDischarge * HitDot * 0.002f * DeltaDays * Manager->ErosionMultiplier;
+                                        else if (HitDot < -0.4f && NCellD->Sediment > 0.1f) BankDeposition += NCellD->Sediment * 0.02f * DeltaDays;
                                     }
                                 }
                             }
@@ -700,87 +715,89 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
                         if (BankErosion > 0.0f) {
                             float ActualErode = FMath::Min(BankErosion / MaterialResistance, 0.05f * DeltaDays);
-                            float MaxAllowed = FMath::Max(0.0f, Cell.Elevation - Manager->SeaLevel);
+                            float MaxAllowed = FMath::Max(0.0f, SCell.Elevation - Manager->SeaLevel);
                             ActualErode = FMath::Min(ActualErode, MaxAllowed);
 
-                            Cell.ElevationDelta -= ActualErode;
-                            Cell.SedimentDelta += ActualErode;
+                            DCell.ElevationDelta -= ActualErode;
+                            DCell.SedimentDelta += ActualErode;
                             Chunk.AccumulatedTerrainChange += ActualErode;
                         }
                         if (BankDeposition > 0.0f) {
                             float ActualDep = FMath::Min(BankDeposition, 0.05f * DeltaDays);
-                            Cell.ElevationDelta += ActualDep;
-                            Cell.DepositedSediment += ActualDep;
+                            DCell.ElevationDelta += ActualDep;
+                            DCell.DepositedSediment += ActualDep;
                             Chunk.AccumulatedTerrainChange += ActualDep;
                         }
                     }
 
-                    float DepthPenalty = FMath::Clamp(1.0f - (Cell.ChannelDepth / 5.0f), 0.05f, 1.0f);
-                    float BaseLevelPenalty = FMath::Clamp((Cell.Elevation - Manager->SeaLevel) / 50.0f, 0.0f, 1.0f);
-                    float VegetationProtection = FMath::Clamp(0.2f + Cell.ForestDensity * 0.7f + Cell.FloraDensity * 0.2f, 0.0f, 1.0f);
+                    float DepthPenalty = FMath::Clamp(1.0f - (SCell.ChannelDepth / 5.0f), 0.05f, 1.0f);
+                    float BaseLevelPenalty = FMath::Clamp((SCell.Elevation - Manager->SeaLevel) / 50.0f, 0.0f, 1.0f);
+                    float VegetationProtection = FMath::Clamp(0.2f + DCell.ForestDensity * 0.7f + DCell.FloraDensity * 0.2f, 0.0f, 1.0f);
 
                     float Slope = 0.0f;
                     bool bFlowsToOcean = false;
 
-                    if (Cell.FlowDirectionGlobalX != -1) {
-                        int32 FlowDX = Cell.FlowDirectionGlobalX - GlobalX;
-                        int32 FlowDY = Cell.FlowDirectionGlobalY - GlobalY;
-                        const FCellData* TargetCell = GetNeighbor(FlowDX, FlowDY);
+                    if (SCell.FlowDirectionGlobalX != -1) {
+                        int32 FlowDX = SCell.FlowDirectionGlobalX - GlobalX;
+                        int32 FlowDY = SCell.FlowDirectionGlobalY - GlobalY;
 
-                        if (TargetCell) {
-                            Slope = FMath::Max(0.0f, (Cell.Elevation + Cell.SurfaceWater) - (TargetCell->Elevation + TargetCell->SurfaceWater));
-                            if (TargetCell->WaterType == EWaterType::Ocean || TargetCell->Elevation <= Manager->SeaLevel) {
+                        const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
+                        GetNeighbor(FlowDX, FlowDY, TargetCellS, TargetCellD);
+
+                        if (TargetCellS && TargetCellD) {
+                            Slope = FMath::Max(0.0f, (SCell.Elevation + DCell.SurfaceWater) - (TargetCellS->Elevation + TargetCellD->SurfaceWater));
+                            if (TargetCellS->WaterType == EWaterType::Ocean || TargetCellS->Elevation <= Manager->SeaLevel) {
                                 bFlowsToOcean = true;
                                 Slope = FMath::Min(Slope, 0.01f);
                             }
                         }
                     }
 
-                    float ElevAboveSea = FMath::Max(0.0f, Cell.Elevation - Manager->SeaLevel);
+                    float ElevAboveSea = FMath::Max(0.0f, SCell.Elevation - Manager->SeaLevel);
                     float LowlandFactor = FMath::Clamp(1.0f - (ElevAboveSea / 250.0f), 0.0f, 1.0f);
 
                     float CapacityMultiplier = FMath::Lerp(0.8f, 0.1f, LowlandFactor);
                     if (bFlowsToOcean) CapacityMultiplier *= 0.4f;
 
-                    float SedimentCapacity = Cell.WaterFlow * FMath::Max(0.01f, Slope) * CapacityMultiplier;
+                    float SedimentCapacity = DCell.WaterFlow * FMath::Max(0.01f, Slope) * CapacityMultiplier;
                     if (bIsFlooding) SedimentCapacity *= 3.0f;
 
-                    if (Cell.Sediment <= SedimentCapacity && Cell.WaterFlow > 0.1f && Slope > 0.02f && !bFlowsToOcean) {
+                    if (DCell.Sediment <= SedimentCapacity && DCell.WaterFlow > 0.1f && Slope > 0.02f && !bFlowsToOcean) {
                         float LocalErosionMult = Manager->ErosionMultiplier * FMath::Lerp(1.0f, 0.05f, LowlandFactor) * DepthPenalty * BaseLevelPenalty * (1.0f - VegetationProtection);
-                        if (bIsFlooding) LocalErosionMult *= (Cell.ChannelDepth < 1.0f) ? 15.0f : 5.0f;
+                        if (bIsFlooding) LocalErosionMult *= (SCell.ChannelDepth < 1.0f) ? 15.0f : 5.0f;
 
-                        float ErosionPotential = (SedimentCapacity - Cell.Sediment) * ErosionCoefficient * LocalErosionMult;
+                        float ErosionPotential = (SedimentCapacity - DCell.Sediment) * ErosionCoefficient * LocalErosionMult;
 
                         float ActualErode = FMath::Min(ErosionPotential / MaterialResistance, 0.25f * DeltaDays);
-                        float MaxAllowedErosion = FMath::Max(0.0f, Cell.Elevation - Manager->SeaLevel);
+                        float MaxAllowedErosion = FMath::Max(0.0f, SCell.Elevation - Manager->SeaLevel);
                         ActualErode = FMath::Min(ActualErode, MaxAllowedErosion);
 
                         if (ActualErode > 0.0f) {
-                            Cell.ElevationDelta -= ActualErode;
-                            Cell.SedimentDelta += ActualErode;
+                            DCell.ElevationDelta -= ActualErode;
+                            DCell.SedimentDelta += ActualErode;
                             Chunk.AccumulatedTerrainChange += ActualErode;
                         }
                     }
-                    else if (Cell.Sediment > SedimentCapacity && Cell.SurfaceWater > 0.05f) {
-                        float Excess = Cell.Sediment - SedimentCapacity;
+                    else if (DCell.Sediment > SedimentCapacity && DCell.SurfaceWater > 0.05f) {
+                        float Excess = DCell.Sediment - SedimentCapacity;
                         float DepositFactor = FMath::Lerp(0.2f, 1.0f, LowlandFactor) * FMath::Clamp(1.0f - (Slope / 2.0f), 0.5f, 1.0f);
                         float Deposit = Excess * DepositFactor * DepositionRate * DeltaDays;
                         Deposit = FMath::Min(Deposit, 0.05f * DeltaDays);
 
-                        Cell.ElevationDelta += Deposit;
-                        Cell.DepositedSediment += Deposit;
-                        Cell.SedimentDelta -= Deposit;
+                        DCell.ElevationDelta += Deposit;
+                        DCell.DepositedSediment += Deposit;
+                        DCell.SedimentDelta -= Deposit;
                         Chunk.AccumulatedTerrainChange += Deposit;
                     }
 
                     float MySedimentOutflow = 0.0f;
-                    if (Cell.FlowDirectionGlobalX != -1) {
+                    if (SCell.FlowDirectionGlobalX != -1) {
                         float TransportFactor = FMath::Lerp(0.8f, 0.2f, LowlandFactor);
-                        MySedimentOutflow = FMath::Min(Cell.Sediment, Cell.WaterFlow * TransportFactor * DeltaDays);
+                        MySedimentOutflow = FMath::Min(DCell.Sediment, DCell.WaterFlow * TransportFactor * DeltaDays);
                     }
-                    Cell.SedimentDelta -= MySedimentOutflow;
+                    DCell.SedimentDelta -= MySedimentOutflow;
                 }
-            } // TATO ZAVORKA CHYBELA!!!
+            }
             });
 
         ParallelFor(GlobalEnd, [&](int32 idx) {
@@ -791,17 +808,14 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
                     int32 i = X + Y * Manager->ChunkSize;
-                    Chunk.MicroCells[i].Elevation += Chunk.MicroCells[i].ElevationDelta;
-                    Chunk.MicroCells[i].Sediment += Chunk.MicroCells[i].SedimentDelta;
-                    Chunk.MicroCells[i].ElevationDelta = 0.0f;
-                    Chunk.MicroCells[i].SedimentDelta = 0.0f;
+                    Chunk.StaticCells[i].Elevation += Chunk.DynamicCells[i].ElevationDelta;
+                    Chunk.DynamicCells[i].Sediment += Chunk.DynamicCells[i].SedimentDelta;
+                    Chunk.DynamicCells[i].ElevationDelta = 0.0f;
+                    Chunk.DynamicCells[i].SedimentDelta = 0.0f;
                 }
             }
             });
 
-        // ----------------------------------------------------
-        // FÁZE 6: SEDIMENT INFLOW (Sbìr naplavenin)
-        // ----------------------------------------------------
         ParallelFor(GlobalEnd, [&](int32 idx) {
             FIntPoint Coord = ChunkKeys[idx];
             if (!WorldChunks.Contains(Coord)) return;
@@ -813,48 +827,51 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
                     int32 i = X + Y * Manager->ChunkSize;
-                    FCellData& Cell = Chunk.MicroCells[i];
+                    FCellStaticData& SCell = Chunk.StaticCells[i];
+                    FCellDynamicData& DCell = Chunk.DynamicCells[i];
 
                     int32 GlobalX = (Coord.X * CSize) + X; int32 GlobalY = (Coord.Y * CSize) + Y;
 
-                    auto GetNeighbor = [&](int32 dx, int32 dy) -> const FCellData* {
-                        return Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager);
+                    auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
+                        Halo.GetNeighbor(X + dx, Y + dy, Chunk, Manager, OutS, OutD);
                         };
 
                     float SedimentInflow = 0.0f;
                     for (int32 n = 0; n < 8; n++) {
-                        const FCellData* NCell = GetNeighbor(Offsets[n][0], Offsets[n][1]);
-                        if (NCell && NCell->FlowDirectionGlobalX == GlobalX && NCell->FlowDirectionGlobalY == GlobalY) {
-                            float N_ElevAboveSea = FMath::Max(0.0f, NCell->Elevation - Manager->SeaLevel);
+                        const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
+                        GetNeighbor(Offsets[n][0], Offsets[n][1], NCellS, NCellD);
+
+                        if (NCellS && NCellD && NCellS->FlowDirectionGlobalX == GlobalX && NCellS->FlowDirectionGlobalY == GlobalY) {
+                            float N_ElevAboveSea = FMath::Max(0.0f, NCellS->Elevation - Manager->SeaLevel);
                             float N_LowlandFactor = FMath::Clamp(1.0f - (N_ElevAboveSea / 250.0f), 0.0f, 1.0f);
                             float N_TransportFactor = FMath::Lerp(0.8f, 0.2f, N_LowlandFactor);
 
-                            if (NCell->Elevation <= Manager->SeaLevel) N_TransportFactor = 0.9f;
+                            if (NCellS->Elevation <= Manager->SeaLevel) N_TransportFactor = 0.9f;
 
-                            float NFlow = (NCell->Elevation <= Manager->SeaLevel) ? 1.0f : NCell->WaterFlow;
-                            float NSedimentOutflow = FMath::Min(NCell->Sediment, NFlow * N_TransportFactor * DeltaDays);
+                            float NFlow = (NCellS->Elevation <= Manager->SeaLevel) ? 1.0f : NCellD->WaterFlow;
+                            float NSedimentOutflow = FMath::Min(NCellD->Sediment, NFlow * N_TransportFactor * DeltaDays);
                             SedimentInflow += NSedimentOutflow;
                         }
                     }
-                    Cell.Sediment += SedimentInflow;
+                    DCell.Sediment += SedimentInflow;
 
-                    if (Cell.WaterType == EWaterType::Ocean || Cell.Elevation <= Manager->SeaLevel) continue;
+                    if (SCell.WaterType == EWaterType::Ocean || SCell.Elevation <= Manager->SeaLevel) continue;
 
-                    float TargetWidth = 1.0f + FMath::Clamp(Cell.RiverDischarge * 0.05f, 0.0f, 4.0f);
-                    float TargetDepth = 2.0f + FMath::Clamp(Cell.RiverDischarge * 0.15f, 0.0f, 8.0f);
+                    float TargetWidth = 1.0f + FMath::Clamp(DCell.RiverDischarge * 0.05f, 0.0f, 4.0f);
+                    float TargetDepth = 2.0f + FMath::Clamp(DCell.RiverDischarge * 0.15f, 0.0f, 8.0f);
 
-                    bool bIsFlooding = Cell.SurfaceWater > (Cell.ChannelDepth + Cell.BankHeight + 0.2f);
+                    bool bIsFlooding = DCell.SurfaceWater > (SCell.ChannelDepth + SCell.BankHeight + 0.2f);
                     if (bIsFlooding) {
-                        Cell.ChannelWidth = FMath::Lerp(Cell.ChannelWidth, TargetWidth * 1.2f, 0.15f * DeltaDays);
-                        Cell.ChannelDepth = FMath::Lerp(Cell.ChannelDepth, TargetDepth * 1.2f, 0.15f * DeltaDays);
+                        SCell.ChannelWidth = FMath::Lerp(SCell.ChannelWidth, TargetWidth * 1.2f, 0.15f * DeltaDays);
+                        SCell.ChannelDepth = FMath::Lerp(SCell.ChannelDepth, TargetDepth * 1.2f, 0.15f * DeltaDays);
                     }
                     else {
-                        Cell.ChannelWidth = FMath::Lerp(Cell.ChannelWidth, TargetWidth, 0.05f * DeltaDays);
-                        Cell.ChannelDepth = FMath::Lerp(Cell.ChannelDepth, TargetDepth, 0.05f * DeltaDays);
+                        SCell.ChannelWidth = FMath::Lerp(SCell.ChannelWidth, TargetWidth, 0.05f * DeltaDays);
+                        SCell.ChannelDepth = FMath::Lerp(SCell.ChannelDepth, TargetDepth, 0.05f * DeltaDays);
                     }
 
-                    if (Cell.RiverDischarge > 1.0f && Cell.WaterFlow < 0.5f) {
-                        Cell.BankHeight = FMath::Lerp(Cell.BankHeight, Cell.Sediment * 0.2f, 0.02f * DeltaDays);
+                    if (DCell.RiverDischarge > 1.0f && DCell.WaterFlow < 0.5f) {
+                        SCell.BankHeight = FMath::Lerp(SCell.BankHeight, DCell.Sediment * 0.2f, 0.02f * DeltaDays);
                     }
                 }
             }
@@ -862,21 +879,25 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             for (int32 step = 0; step < Manager->ChunkSize; step++) {
                 int32 GlobalRightX = (ChunkKeys[idx].X * CSize) + CSize;
                 int32 GlobalRightY = (ChunkKeys[idx].Y * CSize) + step;
-                const FCellData* RealRight = nullptr;
-                if (Manager->GetCellGlobalPtr(GlobalRightX, GlobalRightY, RealRight)) {
-                    Chunk.MicroCells[CSize + step * Manager->ChunkSize] = *RealRight;
+                const FCellStaticData* RealRightS = nullptr; const FCellDynamicData* RealRightD = nullptr;
+                if (Manager->GetCellStaticGlobalPtr(GlobalRightX, GlobalRightY, RealRightS) && Manager->GetCellDynamicGlobalPtr(GlobalRightX, GlobalRightY, RealRightD)) {
+                    Chunk.StaticCells[CSize + step * Manager->ChunkSize] = *RealRightS;
+                    Chunk.DynamicCells[CSize + step * Manager->ChunkSize] = *RealRightD;
                 }
 
                 int32 GlobalBotX = (ChunkKeys[idx].X * CSize) + step;
                 int32 GlobalBotY = (ChunkKeys[idx].Y * CSize) + CSize;
-                const FCellData* RealBot = nullptr;
-                if (Manager->GetCellGlobalPtr(GlobalBotX, GlobalBotY, RealBot)) {
-                    Chunk.MicroCells[step + CSize * Manager->ChunkSize] = *RealBot;
+                const FCellStaticData* RealBotS = nullptr; const FCellDynamicData* RealBotD = nullptr;
+                if (Manager->GetCellStaticGlobalPtr(GlobalBotX, GlobalBotY, RealBotS) && Manager->GetCellDynamicGlobalPtr(GlobalBotX, GlobalBotY, RealBotD)) {
+                    Chunk.StaticCells[step + CSize * Manager->ChunkSize] = *RealBotS;
+                    Chunk.DynamicCells[step + CSize * Manager->ChunkSize] = *RealBotD;
                 }
             }
-            const FCellData* RealCorner = nullptr;
-            if (Manager->GetCellGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCorner)) {
-                Chunk.MicroCells[CSize + CSize * Manager->ChunkSize] = *RealCorner;
+            const FCellStaticData* RealCornerS = nullptr; const FCellDynamicData* RealCornerD = nullptr;
+            if (Manager->GetCellStaticGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerS) &&
+                Manager->GetCellDynamicGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerD)) {
+                Chunk.StaticCells[CSize + CSize * Manager->ChunkSize] = *RealCornerS;
+                Chunk.DynamicCells[CSize + CSize * Manager->ChunkSize] = *RealCornerD;
             }
 
             if (SafeFlags[idx] != 0) {
@@ -892,22 +913,22 @@ bool UHydroSystem::TryCreateSpring(ASimWorldManager* Manager, int32 GlobalX, int
 {
     if (!Manager) return false;
 
-    FCellData* TargetCell = nullptr;
+    FCellStaticData* SCell = nullptr;
+    FCellDynamicData* DCell = nullptr;
     FIntPoint ChunkCoord;
-    if (!Manager->GetMutableCellGlobal(GlobalX, GlobalY, TargetCell, ChunkCoord)) return false;
+    if (!Manager->GetMutableCellGlobal(GlobalX, GlobalY, SCell, DCell, ChunkCoord)) return false;
 
     float GroundWaterReq = 40.0f;
-    if (TargetCell->GroundWater < GroundWaterReq) {
-        UE_LOG(LogTemp, Warning, TEXT("Nelze vytvorit pramen: Nedostatek spodni vody (%.2f < %.2f)"), TargetCell->GroundWater, GroundWaterReq);
+    if (DCell->GroundWater < GroundWaterReq) {
         return false;
     }
 
     if (!Manager->ManaModule->SpendMana(150.0f, TEXT("Prorazeni pramene"))) return false;
 
-    TargetCell->bIsSpring = true;
-    TargetCell->WaterType = EWaterType::Spring;
-    TargetCell->SpringStrength = 3.0f;
-    TargetCell->GroundWater -= GroundWaterReq;
+    SCell->bIsSpring = true;
+    SCell->WaterType = EWaterType::Spring;
+    SCell->SpringStrength = 3.0f;
+    DCell->GroundWater -= GroundWaterReq;
 
     Manager->RegisterVisualChange(ChunkCoord, EChunkVisualDirty::Water | EChunkVisualDirty::Terrain, true);
 
@@ -916,18 +937,19 @@ bool UHydroSystem::TryCreateSpring(ASimWorldManager* Manager, int32 GlobalX, int
         for (int32 dx = -Radius; dx <= Radius; dx++) {
             if (dx == 0 && dy == 0) continue;
 
-            FCellData* NeighborCell = nullptr;
+            FCellStaticData* NSCell = nullptr;
+            FCellDynamicData* NDCell = nullptr;
             FIntPoint NChunkCoord;
-            if (Manager->GetMutableCellGlobal(GlobalX + dx, GlobalY + dy, NeighborCell, NChunkCoord)) {
+            if (Manager->GetMutableCellGlobal(GlobalX + dx, GlobalY + dy, NSCell, NDCell, NChunkCoord)) {
 
-                NeighborCell->GroundWater = FMath::Max(0.0f, NeighborCell->GroundWater - 5.0f);
+                NDCell->GroundWater = FMath::Max(0.0f, NDCell->GroundWater - 5.0f);
 
-                if (NeighborCell->bIsSpring && NeighborCell->Elevation > TargetCell->Elevation) {
-                    NeighborCell->SpringStrength *= 0.5f;
+                if (NSCell->bIsSpring && NSCell->Elevation > SCell->Elevation) {
+                    NSCell->SpringStrength *= 0.5f;
 
-                    if (NeighborCell->SpringStrength < 0.5f) {
-                        NeighborCell->bIsSpring = false;
-                        NeighborCell->WaterType = EWaterType::Surface;
+                    if (NSCell->SpringStrength < 0.5f) {
+                        NSCell->bIsSpring = false;
+                        NSCell->WaterType = EWaterType::Surface;
                     }
                 }
             }

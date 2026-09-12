@@ -1,5 +1,3 @@
-
-
 #include "RelationSystem.h"
 #include "SimWorldManager.h"
 #include "SettlementSystem.h"
@@ -106,9 +104,11 @@ void URelationSystem::ProcessTribeInteractions(TArray<FTribeData>& Tribes, ASimW
                             }
 
                             EBiomeType EncounterBiome = EBiomeType::Grassland;
-                            FCellData Cell;
-                            if (Manager->GetCellDataAtLocation(FVector(Tribes[i].Position.X, Tribes[i].Position.Y, 0.0f), Cell)) {
-                                EncounterBiome = Cell.Biome;
+
+                            FCellStaticData SCell;
+                            FCellDynamicData DCell;
+                            if (Manager->GetCellDataAtLocation(FVector(Tribes[i].Position.X, Tribes[i].Position.Y, 0.0f), SCell, DCell)) {
+                                EncounterBiome = SCell.Biome;
                             }
 
                             float W_Combat = 30.0f, W_Trade = 30.0f, W_Merge = 30.0f;
@@ -306,10 +306,10 @@ void URelationSystem::ProcessSettlementInteractions(TArray<FSettlementData>& Set
                                     if (Loser->Population == 0) {
                                         bSettlementDestroyed = (Loser == &Settlements[i]);
                                         for (FIntPoint Coord : Loser->ClaimedCells) {
-                                            FCellData* C = nullptr; FIntPoint CC;
-                                            if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, C, CC)) {
-                                                C->OwnerSettlementID = -1; C->OwnerNationID = -1; C->PoliticalColor = FLinearColor::Transparent;
-                                                C->BuildingType = EBuildingType::None; C->bHasRoad = false;
+                                            FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint CC;
+                                            if (Manager->GetMutableCellGlobal(Coord.X, Coord.Y, SCell, DCell, CC)) {
+                                                SCell->OwnerSettlementID = -1; SCell->OwnerNationID = -1; SCell->PoliticalColor = FLinearColor::Transparent;
+                                                SCell->BuildingType = EBuildingType::None; SCell->bHasRoad = false;
                                                 Manager->RegisterVisualChange(CC, EChunkVisualDirty::Terrain);
                                             }
                                         }
@@ -345,14 +345,16 @@ void URelationSystem::ProcessSettlementInteractions(TArray<FSettlementData>& Set
                         if (Dist < 12000.0f) {
 
                             FVector2D MidPoint = (Settlements[i].Position + Settlements[j].Position) * 0.5f;
-                            FCellData MidCell;
+
+                            FCellStaticData MidSCell;
+                            FCellDynamicData MidDCell;
                             bool bIsSeparatedByGeography = false;
 
-                            if (Manager->GetCellDataAtLocation(FVector(MidPoint.X, MidPoint.Y, 0), MidCell)) {
-                                if (MidCell.SurfaceWater > 0.5f || MidCell.Elevation <= Manager->SeaLevel) {
+                            if (Manager->GetCellDataAtLocation(FVector(MidPoint.X, MidPoint.Y, 0), MidSCell, MidDCell)) {
+                                if (MidDCell.SurfaceWater > 0.5f || MidSCell.Elevation <= Manager->SeaLevel) {
                                     bIsSeparatedByGeography = true;
                                 }
-                                if (MidCell.Elevation > Manager->SeaLevel + 500.0f) {
+                                if (MidSCell.Elevation > Manager->SeaLevel + 500.0f) {
                                     bIsSeparatedByGeography = true;
                                 }
                             }
@@ -368,8 +370,10 @@ void URelationSystem::ProcessSettlementInteractions(TArray<FSettlementData>& Set
                             float ResB = Settlements[j].Inventory.FloraFood + Settlements[j].Inventory.MeatFood + Settlements[j].Inventory.Wood + Settlements[j].Inventory.Stone + Settlements[j].Inventory.Weapons * 5.0f;
 
                             EBiomeType BiomeA = EBiomeType::Grassland;
-                            FCellData CellA;
-                            if (Manager->GetCellDataAtLocation(FVector(Settlements[i].Position.X, Settlements[i].Position.Y, 0), CellA)) BiomeA = CellA.Biome;
+
+                            FCellStaticData SCellA;
+                            FCellDynamicData DCellA;
+                            if (Manager->GetCellDataAtLocation(FVector(Settlements[i].Position.X, Settlements[i].Position.Y, 0), SCellA, DCellA)) BiomeA = SCellA.Biome;
 
                             float W_Combat = 30.0f, W_Trade = 50.0f, W_Merge = 20.0f;
 

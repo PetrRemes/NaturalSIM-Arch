@@ -28,7 +28,7 @@ void UTechnologySystem::GainKnowledge(FKnowledgeContainer& Container, EKnowledge
     }
 }
 
-void UTechnologySystem::EvaluateEntityKnowledge(FKnowledgeContainer& Knowledge, FCultureProfile& Culture, const FCellData& LocalEnvironment, ASimWorldManager* Manager, int32 EntityID, bool bIsSettlement, FVector2D Location)
+void UTechnologySystem::EvaluateEntityKnowledge(FKnowledgeContainer& Knowledge, FCultureProfile& Culture, const FCellStaticData& SCell, const FCellDynamicData& DCell, ASimWorldManager* Manager, int32 EntityID, bool bIsSettlement, FVector2D Location)
 {
     if (!Manager) return;
 
@@ -53,7 +53,7 @@ void UTechnologySystem::EvaluateEntityKnowledge(FKnowledgeContainer& Knowledge, 
         if (!bCanDiscover) continue;
 
         for (const FName& EnvTrig : Disc.EnvironmentalTriggers) {
-            if (!CheckEnvironmentalTrigger(EnvTrig, LocalEnvironment, Manager)) {
+            if (!CheckEnvironmentalTrigger(EnvTrig, SCell, DCell, Manager)) {
                 bCanDiscover = false; break;
             }
         }
@@ -129,17 +129,17 @@ void UTechnologySystem::EvaluateEntityKnowledge(FKnowledgeContainer& Knowledge, 
     }
 }
 
-bool UTechnologySystem::CheckEnvironmentalTrigger(FName Trigger, const FCellData& Env, ASimWorldManager* Manager)
+bool UTechnologySystem::CheckEnvironmentalTrigger(FName Trigger, const FCellStaticData& SCell, const FCellDynamicData& DCell, ASimWorldManager* Manager)
 {
-    if (Trigger == "River") return (Env.SurfaceWater > 0.1f || Env.RiverDischarge > 0.5f);
-    if (Trigger == "Forest") return (Env.Biome == EBiomeType::DeciduousForest || Env.Biome == EBiomeType::ConiferousForest || Env.Biome == EBiomeType::TropicalForest);
-    if (Trigger == "Coast") return (Env.Biome == EBiomeType::Beach || Env.WaterType == EWaterType::Ocean);
-    if (Trigger == "Mountain") return (Env.Elevation > Manager->SeaLevel + 800.0f || Env.Bedrock == EBedrockType::Rock);
-    if (Trigger == "Fertile") return (Env.FloraDensity > 0.4f);
-    if (Trigger == "HarshClimate") return (Env.Temperature < 5.0f || Env.Temperature > 35.0f);
-    if (Trigger == "ClaySource") return (Env.ClayAmount > 10.0f);
-    if (Trigger == "Desert") return (Env.Biome == EBiomeType::Desert);
-    if (Trigger == "DeepMountain") return (Env.Elevation > Manager->SeaLevel + 1500.0f);
+    if (Trigger == "River") return (DCell.SurfaceWater > 0.1f || DCell.RiverDischarge > 0.5f);
+    if (Trigger == "Forest") return (SCell.Biome == EBiomeType::DeciduousForest || SCell.Biome == EBiomeType::ConiferousForest || SCell.Biome == EBiomeType::TropicalForest);
+    if (Trigger == "Coast") return (SCell.Biome == EBiomeType::Beach || SCell.WaterType == EWaterType::Ocean);
+    if (Trigger == "Mountain") return (SCell.Elevation > Manager->SeaLevel + 800.0f || SCell.Bedrock == EBedrockType::Rock);
+    if (Trigger == "Fertile") return (DCell.FloraDensity > 0.4f);
+    if (Trigger == "HarshClimate") return (DCell.Temperature < 5.0f || DCell.Temperature > 35.0f);
+    if (Trigger == "ClaySource") return (SCell.ClayAmount > 10.0f);
+    if (Trigger == "Desert") return (SCell.Biome == EBiomeType::Desert);
+    if (Trigger == "DeepMountain") return (SCell.Elevation > Manager->SeaLevel + 1500.0f);
 
     return true;
 }
@@ -153,7 +153,6 @@ void UTechnologySystem::RegisterDefaultDiscoveries()
 {
     KnownDiscoveries.Empty();
 
-    // --- PRAVÌK A STAROVÌK ---
     FDiscoveryDefinition D1; D1.DiscoveryName = "Controlled Fire"; D1.RequiredKnowledge.Add(EKnowledgeField::Woodcraft, 1.0f); D1.ExperienceTriggers.Add("Woodcutting"); D1.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D1);
     FDiscoveryDefinition D2; D2.DiscoveryName = "Basic Shelter"; D2.ExperienceTriggers.Add("Survival"); D2.CulturalAffinity = ECulturalPillar::Industry; KnownDiscoveries.Add(D2);
     FDiscoveryDefinition D3; D3.DiscoveryName = "Plant Cultivation"; D3.RequiredKnowledge.Add(EKnowledgeField::Agriculture, 2.0f); D3.EnvironmentalTriggers.Add("Fertile"); D3.ExperienceTriggers.Add("Foraging"); D3.CulturalAffinity = ECulturalPillar::Ecology; KnownDiscoveries.Add(D3);
@@ -169,28 +168,23 @@ void UTechnologySystem::RegisterDefaultDiscoveries()
     FDiscoveryDefinition D13; D13.DiscoveryName = "Ore Properties"; D13.EnvironmentalTriggers.Add("Mountain"); D13.RequiredKnowledge.Add(EKnowledgeField::Metallurgy, 5.0f); D13.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D13);
     FDiscoveryDefinition D14; D14.DiscoveryName = "Market Dynamics"; D14.RequiredKnowledge.Add(EKnowledgeField::Sociology, 15.0f); D14.CulturalAffinity = ECulturalPillar::Commerce; KnownDiscoveries.Add(D14);
 
-    // FÁZE 5: Kultura a víra
     FDiscoveryDefinition D_Animism; D_Animism.DiscoveryName = "Animism"; D_Animism.ExperienceTriggers.Add("Survival"); D_Animism.CulturalAffinity = ECulturalPillar::Spirituality; KnownDiscoveries.Add(D_Animism);
     FDiscoveryDefinition D_Pantheon; D_Pantheon.DiscoveryName = "Pantheon"; D_Pantheon.RequiredKnowledge.Add(EKnowledgeField::Sociology, 10.0f); D_Pantheon.RequiredDiscoveries.Add("Animism"); D_Pantheon.CulturalAffinity = ECulturalPillar::Spirituality; KnownDiscoveries.Add(D_Pantheon);
     FDiscoveryDefinition D_Philosophy; D_Philosophy.DiscoveryName = "Philosophy"; D_Philosophy.RequiredKnowledge.Add(EKnowledgeField::Academics, 10.0f); D_Philosophy.RequiredDiscoveries.Add("Social Hierarchy"); D_Philosophy.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D_Philosophy);
 
-    // --- STØEDOVÌK ---
     FDiscoveryDefinition D15; D15.DiscoveryName = "Defensive Architecture"; D15.RequiredKnowledge.Add(EKnowledgeField::Masonry, 15.0f); D15.RequiredKnowledge.Add(EKnowledgeField::Warfare, 10.0f); D15.CulturalAffinity = ECulturalPillar::Militarism; KnownDiscoveries.Add(D15);
     FDiscoveryDefinition D16; D16.DiscoveryName = "Deep Earth Minerals"; D16.EnvironmentalTriggers.Add("Mountain"); D16.RequiredKnowledge.Add(EKnowledgeField::Metallurgy, 15.0f); D16.CulturalAffinity = ECulturalPillar::Industry; KnownDiscoveries.Add(D16);
     FDiscoveryDefinition D17; D17.DiscoveryName = "Tides and Currents"; D17.EnvironmentalTriggers.Add("Coast"); D17.RequiredKnowledge.Add(EKnowledgeField::Maritime, 15.0f); D17.CulturalAffinity = ECulturalPillar::Exploration; KnownDiscoveries.Add(D17);
 
-    // --- PRÙMYSLOVÁ REVOLUCE A NOVOVÌK ---
     FDiscoveryDefinition D18; D18.DiscoveryName = "Thermodynamics"; D18.RequiredKnowledge.Add(EKnowledgeField::Engineering, 15.0f); D18.RequiredKnowledge.Add(EKnowledgeField::Physics, 10.0f); D18.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D18);
     FDiscoveryDefinition D19; D19.DiscoveryName = "Fossil Fuels"; D19.EnvironmentalTriggers.Add("Desert"); D19.RequiredKnowledge.Add(EKnowledgeField::Chemistry, 10.0f); D19.CulturalAffinity = ECulturalPillar::Industry; KnownDiscoveries.Add(D19);
     FDiscoveryDefinition D20; D20.DiscoveryName = "Electromagnetism"; D20.RequiredKnowledge.Add(EKnowledgeField::Physics, 25.0f); D20.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D20);
     FDiscoveryDefinition D21; D21.DiscoveryName = "Hydrocarbons"; D21.EnvironmentalTriggers.Add("Desert"); D21.RequiredKnowledge.Add(EKnowledgeField::Chemistry, 20.0f); D21.CulturalAffinity = ECulturalPillar::Commerce; KnownDiscoveries.Add(D21);
 
-    // --- MODERNÍ DOBA ---
     FDiscoveryDefinition D22; D22.DiscoveryName = "Aerodynamics"; D22.RequiredKnowledge.Add(EKnowledgeField::Physics, 35.0f); D22.RequiredKnowledge.Add(EKnowledgeField::Aerospace, 10.0f); D22.CulturalAffinity = ECulturalPillar::Exploration; KnownDiscoveries.Add(D22);
     FDiscoveryDefinition D23; D23.DiscoveryName = "Atomic Structure"; D23.RequiredKnowledge.Add(EKnowledgeField::Physics, 50.0f); D23.RequiredKnowledge.Add(EKnowledgeField::Chemistry, 40.0f); D23.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D23);
     FDiscoveryDefinition D24; D24.DiscoveryName = "Logic Gates"; D24.RequiredKnowledge.Add(EKnowledgeField::Engineering, 40.0f); D24.RequiredKnowledge.Add(EKnowledgeField::Computing, 10.0f); D24.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D24);
 
-    // --- BLÍZKÁ BUDOUCNOST A SCI-FI ---
     FDiscoveryDefinition D25; D25.DiscoveryName = "Orbital Mechanics"; D25.RequiredKnowledge.Add(EKnowledgeField::Aerospace, 40.0f); D25.RequiredKnowledge.Add(EKnowledgeField::Physics, 60.0f); D25.CulturalAffinity = ECulturalPillar::Exploration; KnownDiscoveries.Add(D25);
     FDiscoveryDefinition D26; D26.DiscoveryName = "Ecosystem Dynamics"; D26.RequiredKnowledge.Add(EKnowledgeField::EnvironmentalScience, 30.0f); D26.RequiredKnowledge.Add(EKnowledgeField::Agriculture, 50.0f); D26.CulturalAffinity = ECulturalPillar::Ecology; KnownDiscoveries.Add(D26);
     FDiscoveryDefinition D27; D27.DiscoveryName = "Neural Networks"; D27.RequiredKnowledge.Add(EKnowledgeField::Computing, 60.0f); D27.CulturalAffinity = ECulturalPillar::Science; KnownDiscoveries.Add(D27);
@@ -201,7 +195,6 @@ void UTechnologySystem::RegisterDefaultTechTree()
 {
     KnownTechnologies.Empty();
 
-    // --- PRAVÌK A STAROVÌK ---
     FTechRequirement T1; T1.UnlockedTechnologyName = "Campfire"; T1.RequiredDiscoveries.Add("Controlled Fire"); KnownTechnologies.Add(T1);
     FTechRequirement T2; T2.UnlockedTechnologyName = "Primitive Huts"; T2.RequiredDiscoveries.Add("Basic Shelter"); T2.RequiredSubKnowledge.Add("Woodcutting", 5.0f); KnownTechnologies.Add(T2);
     FTechRequirement T3; T3.UnlockedTechnologyName = "Selective Farming"; T3.RequiredDiscoveries.Add("Seed Selection"); T3.RequiredDiscoveries.Add("Plant Cultivation"); T3.RequiredKnowledge.Add(EKnowledgeField::Agriculture, 5.0f); KnownTechnologies.Add(T3);
@@ -212,7 +205,6 @@ void UTechnologySystem::RegisterDefaultTechTree()
     FTechRequirement T8; T8.UnlockedTechnologyName = "Irrigation"; T8.RequiredDiscoveries.Add("River Observation"); T8.RequiredTechnologies.Add("Selective Farming"); T8.RequiredKnowledge.Add(EKnowledgeField::Agriculture, 10.0f); KnownTechnologies.Add(T8);
     FTechRequirement T9; T9.UnlockedTechnologyName = "Stoneworking"; T9.RequiredDiscoveries.Add("Stone Cutting"); T9.RequiredKnowledge.Add(EKnowledgeField::Masonry, 8.0f); KnownTechnologies.Add(T9);
 
-    // FÁZE 5: Kulturní a náboženské stavby
     FTechRequirement T_Monuments; T_Monuments.UnlockedTechnologyName = "Monuments"; T_Monuments.RequiredDiscoveries.Add("Pantheon"); T_Monuments.RequiredTechnologies.Add("Stoneworking"); KnownTechnologies.Add(T_Monuments);
 
     FTechRequirement T10; T10.UnlockedTechnologyName = "Food Storage"; T10.RequiredDiscoveries.Add("Food Preservation"); T10.RequiredTechnologies.Add("Pottery"); KnownTechnologies.Add(T10);
@@ -220,25 +212,21 @@ void UTechnologySystem::RegisterDefaultTechTree()
     FTechRequirement T12; T12.UnlockedTechnologyName = "Smelting"; T12.RequiredDiscoveries.Add("Ore Properties"); T12.RequiredTechnologies.Add("Campfire"); T12.RequiredKnowledge.Add(EKnowledgeField::Metallurgy, 10.0f); KnownTechnologies.Add(T12);
     FTechRequirement T13; T13.UnlockedTechnologyName = "Currency"; T13.RequiredDiscoveries.Add("Market Dynamics"); T13.RequiredTechnologies.Add("Clan Organization"); T13.RequiredKnowledge.Add(EKnowledgeField::Sociology, 20.0f); KnownTechnologies.Add(T13);
 
-    // --- STØEDOVÌK A RENESANCE ---
     FTechRequirement T14; T14.UnlockedTechnologyName = "Fortifications"; T14.RequiredDiscoveries.Add("Defensive Architecture"); T14.RequiredTechnologies.Add("Stoneworking"); KnownTechnologies.Add(T14);
     FTechRequirement T15; T15.UnlockedTechnologyName = "Steel Forging"; T15.RequiredDiscoveries.Add("Deep Earth Minerals"); T15.RequiredTechnologies.Add("Smelting"); KnownTechnologies.Add(T15);
     FTechRequirement T16; T16.UnlockedTechnologyName = "Naval Engineering"; T16.RequiredDiscoveries.Add("Tides and Currents"); T16.RequiredTechnologies.Add("Basic Rafts"); T16.RequiredKnowledge.Add(EKnowledgeField::Engineering, 10.0f); KnownTechnologies.Add(T16);
     FTechRequirement T17; T17.UnlockedTechnologyName = "Guilds & Logistics"; T17.RequiredTechnologies.Add("Currency"); T17.RequiredKnowledge.Add(EKnowledgeField::Sociology, 30.0f); KnownTechnologies.Add(T17);
     FTechRequirement T18; T18.UnlockedTechnologyName = "State Borders"; T18.RequiredTechnologies.Add("Guilds & Logistics"); T18.RequiredTechnologies.Add("Fortifications"); KnownTechnologies.Add(T18);
 
-    // --- PRÙMYSLOVÁ REVOLUCE ---
     FTechRequirement T19; T19.UnlockedTechnologyName = "Steam Engine"; T19.RequiredDiscoveries.Add("Thermodynamics"); T19.RequiredDiscoveries.Add("Fossil Fuels"); T19.RequiredTechnologies.Add("Steel Forging"); KnownTechnologies.Add(T19);
     FTechRequirement T20; T20.UnlockedTechnologyName = "Industrial Mass Production"; T20.RequiredTechnologies.Add("Steam Engine"); T20.RequiredKnowledge.Add(EKnowledgeField::Engineering, 30.0f); KnownTechnologies.Add(T20);
     FTechRequirement T21; T21.UnlockedTechnologyName = "Combustion Engine"; T21.RequiredDiscoveries.Add("Hydrocarbons"); T21.RequiredTechnologies.Add("Steam Engine"); T21.RequiredKnowledge.Add(EKnowledgeField::Chemistry, 25.0f); KnownTechnologies.Add(T21);
 
-    // --- MODERNÍ DOBA ---
     FTechRequirement T22; T22.UnlockedTechnologyName = "Electrification"; T22.RequiredDiscoveries.Add("Electromagnetism"); T22.RequiredTechnologies.Add("Industrial Mass Production"); KnownTechnologies.Add(T22);
     FTechRequirement T23; T23.UnlockedTechnologyName = "Aviation"; T23.RequiredDiscoveries.Add("Aerodynamics"); T23.RequiredTechnologies.Add("Combustion Engine"); KnownTechnologies.Add(T23);
     FTechRequirement T24; T24.UnlockedTechnologyName = "Nuclear Fission"; T24.RequiredDiscoveries.Add("Atomic Structure"); T24.RequiredTechnologies.Add("Electrification"); KnownTechnologies.Add(T24);
     FTechRequirement T25; T25.UnlockedTechnologyName = "Early Computing"; T25.RequiredDiscoveries.Add("Logic Gates"); T25.RequiredTechnologies.Add("Electrification"); KnownTechnologies.Add(T25);
 
-    // --- BLÍZKÁ BUDOUCNOST A SCI-FI ---
     FTechRequirement T26; T26.UnlockedTechnologyName = "Space Exploration"; T26.RequiredDiscoveries.Add("Orbital Mechanics"); T26.RequiredTechnologies.Add("Aviation"); T26.RequiredTechnologies.Add("Early Computing"); KnownTechnologies.Add(T26);
     FTechRequirement T27; T27.UnlockedTechnologyName = "Sustainable Infrastructure"; T27.RequiredDiscoveries.Add("Ecosystem Dynamics"); T27.RequiredTechnologies.Add("Electrification"); KnownTechnologies.Add(T27);
     FTechRequirement T28; T28.UnlockedTechnologyName = "Artificial Intelligence"; T28.RequiredDiscoveries.Add("Neural Networks"); T28.RequiredTechnologies.Add("Early Computing"); KnownTechnologies.Add(T28);

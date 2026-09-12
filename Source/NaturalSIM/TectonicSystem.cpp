@@ -1,4 +1,5 @@
 #include "TectonicSystem.h"
+#include "SimWorldTypes.h"
 #include "SimWorldManager.h"
 #include "CosmosSystem.h"
 #include "ManaSystem.h"
@@ -9,71 +10,78 @@
 UTectonicSystem::UTectonicSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UTectonicSystem::BeginPlay() { Super::BeginPlay(); }
 
-// OPTIMALIZACE 3: Struktura Halo Bufferu (Ghost Cells) zamezující volání GetCellGlobalPtr uvnitø smyèek
+// OPTIMALIZACE 4: FHaloBuffer aktualizován pro 2 nezávislá SOA pole
 struct FHaloBuffer {
-    TArray<FCellData> TopEdge, BotEdge, LftEdge, RgtEdge;
+    TArray<FCellStaticData> TopEdgeS, BotEdgeS, LftEdgeS, RgtEdgeS;
+    TArray<FCellDynamicData> TopEdgeD, BotEdgeD, LftEdgeD, RgtEdgeD;
     TArray<bool> HasT, HasB, HasL, HasR;
-    FCellData TL, TR, BL, BR;
+    FCellStaticData TLS, TRS, BLS, BRS;
+    FCellDynamicData TLD, TRD, BLD, BRD;
     bool HasTL = false, HasTR = false, HasBL = false, HasBR = false;
     int32 CSize = 0, CS = 0, BaseGX = 0, BaseGY = 0;
 
     void Fetch(ASimWorldManager* Manager, FIntPoint Coord, int32 InCSize, int32 InCS) {
         CSize = InCSize; CS = InCS;
         BaseGX = Coord.X * CSize; BaseGY = Coord.Y * CSize;
-        TopEdge.SetNumUninitialized(CSize); BotEdge.SetNumUninitialized(CSize);
-        LftEdge.SetNumUninitialized(CSize); RgtEdge.SetNumUninitialized(CSize);
+        TopEdgeS.SetNumUninitialized(CSize); BotEdgeS.SetNumUninitialized(CSize);
+        LftEdgeS.SetNumUninitialized(CSize); RgtEdgeS.SetNumUninitialized(CSize);
+        TopEdgeD.SetNumUninitialized(CSize); BotEdgeD.SetNumUninitialized(CSize);
+        LftEdgeD.SetNumUninitialized(CSize); RgtEdgeD.SetNumUninitialized(CSize);
         HasT.Init(false, CSize); HasB.Init(false, CSize); HasL.Init(false, CSize); HasR.Init(false, CSize);
 
         for (int x = 0; x < CSize; x++) {
-            const FCellData* c;
-            HasT[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY - 1, c); if (HasT[x]) TopEdge[x] = *c;
-            HasB[x] = Manager->GetCellGlobalPtr(BaseGX + x, BaseGY + CSize, c); if (HasB[x]) BotEdge[x] = *c;
+            HasT[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY - 1, TopEdgeS[x], TopEdgeD[x]);
+            HasB[x] = Manager->GetCellGlobal(BaseGX + x, BaseGY + CSize, BotEdgeS[x], BotEdgeD[x]);
         }
         for (int y = 0; y < CSize; y++) {
-            const FCellData* c;
-            HasL[y] = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + y, c); if (HasL[y]) LftEdge[y] = *c;
-            HasR[y] = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + y, c); if (HasR[y]) RgtEdge[y] = *c;
+            HasL[y] = Manager->GetCellGlobal(BaseGX - 1, BaseGY + y, LftEdgeS[y], LftEdgeD[y]);
+            HasR[y] = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + y, RgtEdgeS[y], RgtEdgeD[y]);
         }
-        const FCellData* cor;
-        HasTL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY - 1, cor); if (HasTL) TL = *cor;
-        HasTR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY - 1, cor); if (HasTR) TR = *cor;
-        HasBL = Manager->GetCellGlobalPtr(BaseGX - 1, BaseGY + CSize, cor); if (HasBL) BL = *cor;
-        HasBR = Manager->GetCellGlobalPtr(BaseGX + CSize, BaseGY + CSize, cor); if (HasBR) BR = *cor;
+        HasTL = Manager->GetCellGlobal(BaseGX - 1, BaseGY - 1, TLS, TLD);
+        HasTR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY - 1, TRS, TRD);
+        HasBL = Manager->GetCellGlobal(BaseGX - 1, BaseGY + CSize, BLS, BLD);
+        HasBR = Manager->GetCellGlobal(BaseGX + CSize, BaseGY + CSize, BRS, BRD);
     }
 
-    const FCellData* GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager) {
-        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) return &Chunk.MicroCells[lx + ly * CS];
+    void GetNeighbor(int32 lx, int32 ly, FChunkData& Chunk, ASimWorldManager* Manager, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
+        OutS = nullptr; OutD = nullptr;
+        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
+            int32 Idx = lx + ly * CS;
+            OutS = &Chunk.StaticCells[Idx];
+            OutD = &Chunk.DynamicCells[Idx];
+            return;
+        }
         if (lx >= -1 && lx <= CSize && ly >= -1 && ly <= CSize) {
             if (ly < 0) {
-                if (lx < 0) return HasTL ? &TL : nullptr;
-                if (lx == CSize) return HasTR ? &TR : nullptr;
-                return HasT[lx] ? &TopEdge[lx] : nullptr;
+                if (lx < 0) { if (HasTL) { OutS = &TLS; OutD = &TLD; } return; }
+                if (lx == CSize) { if (HasTR) { OutS = &TRS; OutD = &TRD; } return; }
+                if (HasT[lx]) { OutS = &TopEdgeS[lx]; OutD = &TopEdgeD[lx]; } return;
             }
             if (ly == CSize) {
-                if (lx < 0) return HasBL ? &BL : nullptr;
-                if (lx == CSize) return HasBR ? &BR : nullptr;
-                return HasB[lx] ? &BotEdge[lx] : nullptr;
+                if (lx < 0) { if (HasBL) { OutS = &BLS; OutD = &BLD; } return; }
+                if (lx == CSize) { if (HasBR) { OutS = &BRS; OutD = &BRD; } return; }
+                if (HasB[lx]) { OutS = &BotEdgeS[lx]; OutD = &BotEdgeD[lx]; } return;
             }
-            if (lx < 0) return HasL[ly] ? &LftEdge[ly] : nullptr;
-            if (lx == CSize) return HasR[ly] ? &RgtEdge[ly] : nullptr;
+            if (lx < 0) { if (HasL[ly]) { OutS = &LftEdgeS[ly]; OutD = &LftEdgeD[ly]; } return; }
+            if (lx == CSize) { if (HasR[ly]) { OutS = &RgtEdgeS[ly]; OutD = &RgtEdgeD[ly]; } return; }
         }
-        // Záložní vrstva (radius 2)
-        const FCellData* Fallback = nullptr;
-        Manager->GetCellGlobalPtr(BaseGX + lx, BaseGY + ly, Fallback);
-        return Fallback;
+        FIntPoint DummyCoord;
+        FCellStaticData* S = nullptr; FCellDynamicData* D = nullptr;
+        Manager->GetMutableCellGlobal(BaseGX + lx, BaseGY + ly, S, D, DummyCoord);
+        OutS = S; OutD = D;
     }
 };
 
 void UTectonicSystem::ProcessChunkTectonics(FChunkData& OutChunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params)
 {
-    for (int32 i = 0; i < OutChunk.MicroCells.Num(); i++) {
-        OutChunk.MicroCells[i].LavaBuffer = OutChunk.MicroCells[i].Lava;
+    for (int32 i = 0; i < OutChunk.StaticCells.Num(); i++) {
+        OutChunk.DynamicCells[i].LavaBuffer = OutChunk.DynamicCells[i].Lava;
 
-        if (OutChunk.MicroCells[i].bIsVolcano && OutChunk.MicroCells[i].MagmaPressure == 0.0f) {
-            OutChunk.MicroCells[i].MagmaPressure = FMath::FRandRange(100.0f, 800.0f);
+        if (OutChunk.StaticCells[i].bIsVolcano && OutChunk.DynamicCells[i].MagmaPressure == 0.0f) {
+            OutChunk.DynamicCells[i].MagmaPressure = FMath::FRandRange(100.0f, 800.0f);
         }
 
-        OutChunk.MicroCells[i].EruptionDaysRemaining = 0.0f;
+        OutChunk.DynamicCells[i].EruptionDaysRemaining = 0.0f;
     }
 }
 
@@ -112,21 +120,22 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             Chunk.FaultStress *= FMath::FRandRange(0.1f, 0.2f);
         }
 
-        // OPTIMALIZACE 3: Naètení hranic chunku do L1 Cache
         FHaloBuffer Halo;
         Halo.Fetch(Manager, ChunkKeys[idx], CSize, Manager->ChunkSize);
 
         auto GetLowestNeighbor = [&](int32 cx, int32 cy, int32 lx, int32 ly) -> FIntPoint {
-            const FCellData* cCell = Halo.GetNeighbor(lx, ly, Chunk, Manager);
-            if (!cCell) return FIntPoint(cx, cy);
+            const FCellStaticData* cCellS = nullptr; const FCellDynamicData* cCellD = nullptr;
+            Halo.GetNeighbor(lx, ly, Chunk, Manager, cCellS, cCellD);
+            if (!cCellS || !cCellD) return FIntPoint(cx, cy);
 
-            float lowestH = cCell->Elevation + cCell->Lava;
+            float lowestH = cCellS->Elevation + cCellD->Lava;
             FIntPoint bestP(cx, cy);
 
             for (int i = 0; i < 8; i++) {
-                const FCellData* nCell = Halo.GetNeighbor(lx + Offsets[i][0], ly + Offsets[i][1], Chunk, Manager);
-                if (nCell) {
-                    float h = nCell->Elevation + nCell->Lava;
+                const FCellStaticData* nCellS = nullptr; const FCellDynamicData* nCellD = nullptr;
+                Halo.GetNeighbor(lx + Offsets[i][0], ly + Offsets[i][1], Chunk, Manager, nCellS, nCellD);
+                if (nCellS && nCellD) {
+                    float h = nCellS->Elevation + nCellD->Lava;
                     if (h < lowestH - 0.05f) {
                         lowestH = h;
                         bestP = FIntPoint(cx + Offsets[i][0], cy + Offsets[i][1]);
@@ -136,61 +145,63 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             return bestP;
             };
 
-        // OPTIMALIZACE: Nested loops
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
-                if (i >= Chunk.MicroCells.Num()) continue;
+                if (i >= Chunk.StaticCells.Num()) continue;
 
-                FCellData& Cell = Chunk.MicroCells[i];
+                FCellStaticData& SCell = Chunk.StaticCells[i];
+                FCellDynamicData& DCell = Chunk.DynamicCells[i];
                 int32 GlobalX = (ChunkKeys[idx].X * CSize) + X;
                 int32 GlobalY = (ChunkKeys[idx].Y * CSize) + Y;
 
-                if (Cell.bIsVolcano) {
-                    Cell.MagmaPressure += (TidalMultiplier * Manager->VolcanicActivity * 3.0f * DeltaDays);
+                if (SCell.bIsVolcano) {
+                    DCell.MagmaPressure += (TidalMultiplier * Manager->VolcanicActivity * 3.0f * DeltaDays);
 
-                    if (Cell.EruptionDaysRemaining > 0.0f) {
-                        Cell.EruptionDaysRemaining -= DeltaDays;
+                    if (DCell.EruptionDaysRemaining > 0.0f) {
+                        DCell.EruptionDaysRemaining -= DeltaDays;
 
-                        float EruptionIntensity = FMath::Clamp(Cell.MagmaPressure / 300.0f, 0.5f, 10.0f);
-                        float MagmaReleased = FMath::Min(Cell.MagmaPressure, 150.0f * EruptionIntensity * DeltaDays);
-                        Cell.MagmaPressure -= MagmaReleased;
+                        float EruptionIntensity = FMath::Clamp(DCell.MagmaPressure / 300.0f, 0.5f, 10.0f);
+                        float MagmaReleased = FMath::Min(DCell.MagmaPressure, 150.0f * EruptionIntensity * DeltaDays);
+                        DCell.MagmaPressure -= MagmaReleased;
 
                         float LavaOutput = MagmaReleased * 0.9f;
 
-                        Cell.Lava += LavaOutput;
-                        Cell.DangerLevel = 1.0f;
-                        Cell.Temperature += 150.0f;
-                        Cell.AshDensityBuffer += (MagmaReleased * 0.1f) * DeltaDays;
+                        DCell.Lava += LavaOutput;
+                        DCell.DangerLevel = 1.0f;
+                        DCell.Temperature += 150.0f;
+                        DCell.AshDensityBuffer += (MagmaReleased * 0.1f) * DeltaDays;
 
-                        if (Cell.EruptionDaysRemaining <= 0.0f || Cell.MagmaPressure <= 0.0f) {
-                            Cell.EruptionDaysRemaining = 0.0f;
+                        if (DCell.EruptionDaysRemaining <= 0.0f || DCell.MagmaPressure <= 0.0f) {
+                            DCell.EruptionDaysRemaining = 0.0f;
                         }
                         bTerrainDirty = true;
                         bCloudDirty = true;
                     }
-                    else if (Cell.MagmaPressure > 1000.0f && FMath::FRand() < 0.05f) {
-                        Cell.EruptionDaysRemaining = FMath::FRandRange(10.0f, 30.0f);
+                    else if (DCell.MagmaPressure > 1000.0f && FMath::FRand() < 0.05f) {
+                        DCell.EruptionDaysRemaining = FMath::FRandRange(10.0f, 30.0f);
                         bTerrainDirty = true;
                     }
                 }
 
                 float MyLavaDelta = 0.0f;
-                float MyHead = Cell.Elevation + Cell.Lava;
+                float MyHead = SCell.Elevation + DCell.Lava;
 
                 FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY, X, Y);
 
                 if (TargetFlow.X != GlobalX || TargetFlow.Y != GlobalY) {
                     int32 flowLx = X + (TargetFlow.X - GlobalX);
                     int32 flowLy = Y + (TargetFlow.Y - GlobalY);
-                    const FCellData* TargetCell = Halo.GetNeighbor(flowLx, flowLy, Chunk, Manager);
 
-                    if (TargetCell) {
-                        float TargetHead = TargetCell->Elevation + TargetCell->Lava;
+                    const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
+                    Halo.GetNeighbor(flowLx, flowLy, Chunk, Manager, TargetCellS, TargetCellD);
+
+                    if (TargetCellS && TargetCellD) {
+                        float TargetHead = TargetCellS->Elevation + TargetCellD->Lava;
                         float Diff = MyHead - TargetHead;
 
-                        float Transfer = FMath::Min(Cell.Lava, Diff * 5.0f * DeltaDays);
-                        Transfer = FMath::Min(Transfer, Cell.Lava * 0.9f);
+                        float Transfer = FMath::Min(DCell.Lava, Diff * 5.0f * DeltaDays);
+                        Transfer = FMath::Min(Transfer, DCell.Lava * 0.9f);
                         MyLavaDelta -= Transfer;
                     }
                 }
@@ -201,56 +212,58 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                     int32 nlx = X + Offsets[n][0];
                     int32 nly = Y + Offsets[n][1];
 
-                    const FCellData* NCell = Halo.GetNeighbor(nlx, nly, Chunk, Manager);
+                    const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
+                    Halo.GetNeighbor(nlx, nly, Chunk, Manager, NCellS, NCellD);
 
-                    if (NCell && NCell->Lava > 0.0f) {
+                    if (NCellS && NCellD && NCellD->Lava > 0.0f) {
                         FIntPoint NeighborTarget = GetLowestNeighbor(nx, ny, nlx, nly);
                         if (NeighborTarget.X == GlobalX && NeighborTarget.Y == GlobalY) {
-                            float nHead = NCell->Elevation + NCell->Lava;
+                            float nHead = NCellS->Elevation + NCellD->Lava;
                             float Diff = nHead - MyHead;
-                            float Transfer = FMath::Min(NCell->Lava, Diff * 5.0f * DeltaDays);
-                            Transfer = FMath::Min(Transfer, NCell->Lava * 0.9f);
+                            float Transfer = FMath::Min(NCellD->Lava, Diff * 5.0f * DeltaDays);
+                            Transfer = FMath::Min(Transfer, NCellD->Lava * 0.9f);
                             MyLavaDelta += Transfer;
                         }
                     }
                 }
-                Cell.LavaBuffer = FMath::Max(0.0f, Cell.Lava + MyLavaDelta);
+                DCell.LavaBuffer = FMath::Max(0.0f, DCell.Lava + MyLavaDelta);
             }
         }
 
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
-                if (i >= Chunk.MicroCells.Num()) continue;
+                if (i >= Chunk.StaticCells.Num()) continue;
 
-                FCellData& Cell = Chunk.MicroCells[i];
+                FCellStaticData& SCell = Chunk.StaticCells[i];
+                FCellDynamicData& DCell = Chunk.DynamicCells[i];
 
-                if (Cell.LavaBuffer > 0.0f) {
-                    float CoolingRate = FMath::Lerp(2.0f, 0.01f, FMath::Clamp(Cell.LavaBuffer / 20.0f, 0.0f, 1.0f));
-                    float Cooling = FMath::Min(Cell.LavaBuffer, CoolingRate * DeltaDays);
+                if (DCell.LavaBuffer > 0.0f) {
+                    float CoolingRate = FMath::Lerp(2.0f, 0.01f, FMath::Clamp(DCell.LavaBuffer / 20.0f, 0.0f, 1.0f));
+                    float Cooling = FMath::Min(DCell.LavaBuffer, CoolingRate * DeltaDays);
 
-                    Cell.LavaBuffer -= Cooling;
+                    DCell.LavaBuffer -= Cooling;
 
                     float HardenedRock = Cooling * 0.8f;
-                    Cell.Elevation += HardenedRock;
+                    SCell.Elevation += HardenedRock;
                     Chunk.AccumulatedTerrainChange += HardenedRock;
 
-                    if (Cell.LavaBuffer > 5.0f && Cell.Bedrock != EBedrockType::Rock) {
+                    if (DCell.LavaBuffer > 5.0f && SCell.Bedrock != EBedrockType::Rock) {
                         float Melting = 1.5f * DeltaDays;
-                        Cell.Elevation -= Melting;
+                        SCell.Elevation -= Melting;
                         Chunk.AccumulatedTerrainChange += Melting;
                     }
 
-                    Cell.SoilFertility = FMath::Min(1.0f, Cell.SoilFertility + Cooling * 0.05f);
-                    Cell.MineralOre += Cooling * 50.0f;
+                    DCell.SoilFertility = FMath::Min(1.0f, DCell.SoilFertility + Cooling * 0.05f);
+                    SCell.MineralOre += Cooling * 50.0f;
 
-                    if (Cell.LavaBuffer > 0.1f) {
-                        if (Cell.FloraDensity > 0.0f || Cell.TreeType != ETreeType::None) {
-                            Cell.FireIntensity = 1.0f;
+                    if (DCell.LavaBuffer > 0.1f) {
+                        if (DCell.FloraDensity > 0.0f || SCell.TreeType != ETreeType::None) {
+                            DCell.FireIntensity = 1.0f;
                             bCloudDirty = true;
                         }
-                        Cell.SurfaceWater = 0.0f;
-                        Cell.Bedrock = EBedrockType::Rock;
+                        DCell.SurfaceWater = 0.0f;
+                        SCell.Bedrock = EBedrockType::Rock;
                     }
                 }
             }
@@ -259,17 +272,25 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
         for (int32 step = 0; step < Manager->ChunkSize; step++) {
             int32 GlobalRightX = (ChunkKeys[idx].X * CSize) + CSize;
             int32 GlobalRightY = (ChunkKeys[idx].Y * CSize) + step;
-            const FCellData* RealRight = nullptr;
-            if (Manager->GetCellGlobalPtr(GlobalRightX, GlobalRightY, RealRight)) Chunk.MicroCells[CSize + step * Manager->ChunkSize] = *RealRight;
+            const FCellStaticData* RealRightS = nullptr; const FCellDynamicData* RealRightD = nullptr;
+            if (Manager->GetCellStaticGlobalPtr(GlobalRightX, GlobalRightY, RealRightS) && Manager->GetCellDynamicGlobalPtr(GlobalRightX, GlobalRightY, RealRightD)) {
+                Chunk.StaticCells[CSize + step * Manager->ChunkSize] = *RealRightS;
+                Chunk.DynamicCells[CSize + step * Manager->ChunkSize] = *RealRightD;
+            }
 
             int32 GlobalBotX = (ChunkKeys[idx].X * CSize) + step;
             int32 GlobalBotY = (ChunkKeys[idx].Y * CSize) + CSize;
-            const FCellData* RealBot = nullptr;
-            if (Manager->GetCellGlobalPtr(GlobalBotX, GlobalBotY, RealBot)) Chunk.MicroCells[step + CSize * Manager->ChunkSize] = *RealBot;
+            const FCellStaticData* RealBotS = nullptr; const FCellDynamicData* RealBotD = nullptr;
+            if (Manager->GetCellStaticGlobalPtr(GlobalBotX, GlobalBotY, RealBotS) && Manager->GetCellDynamicGlobalPtr(GlobalBotX, GlobalBotY, RealBotD)) {
+                Chunk.StaticCells[step + CSize * Manager->ChunkSize] = *RealBotS;
+                Chunk.DynamicCells[step + CSize * Manager->ChunkSize] = *RealBotD;
+            }
         }
-        const FCellData* RealCorner = nullptr;
-        if (Manager->GetCellGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCorner)) {
-            Chunk.MicroCells[CSize + CSize * Manager->ChunkSize] = *RealCorner;
+        const FCellStaticData* RealCornerS = nullptr; const FCellDynamicData* RealCornerD = nullptr;
+        if (Manager->GetCellStaticGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerS) &&
+            Manager->GetCellDynamicGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerD)) {
+            Chunk.StaticCells[CSize + CSize * Manager->ChunkSize] = *RealCornerS;
+            Chunk.DynamicCells[CSize + CSize * Manager->ChunkSize] = *RealCornerD;
         }
 
         if (Chunk.AccumulatedTerrainChange > 1.5f) {
@@ -282,8 +303,8 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
 
     for (int32 idx = 0; idx < ChunkKeys.Num(); idx++) {
         FChunkData& Chunk = WorldChunks[ChunkKeys[idx]];
-        for (int i = 0; i < Chunk.MicroCells.Num(); i++) {
-            Chunk.MicroCells[i].Lava = Chunk.MicroCells[i].LavaBuffer;
+        for (int i = 0; i < Chunk.DynamicCells.Num(); i++) {
+            Chunk.DynamicCells[i].Lava = Chunk.DynamicCells[i].LavaBuffer;
         }
         if (SafeFlags[idx] != 0) {
             Manager->RegisterVisualChange(ChunkKeys[idx], SafeFlags[idx]);
@@ -314,9 +335,10 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
 bool UTectonicSystem::TryRaiseTerrain(ASimWorldManager* Manager, int32 GlobalX, int32 GlobalY, float Amount) {
     if (!Manager || !Manager->ManaModule) return false;
     if (!Manager->ManaModule->SpendMana(200.0f, TEXT("Zvednuti terenu"))) return false;
-    FCellData* Cell = nullptr; FIntPoint Coord;
-    if (Manager->GetMutableCellGlobal(GlobalX, GlobalY, Cell, Coord)) {
-        Cell->Elevation += Amount;
+
+    FCellStaticData* SCell = nullptr; FCellDynamicData* DCell = nullptr; FIntPoint Coord;
+    if (Manager->GetMutableCellGlobal(GlobalX, GlobalY, SCell, DCell, Coord)) {
+        SCell->Elevation += Amount;
         Manager->RegisterVisualChange(Coord, EChunkVisualDirty::Terrain, true);
         return true;
     }
@@ -328,11 +350,11 @@ bool UTectonicSystem::SuppressDisaster(ASimWorldManager* Manager, FIntPoint Chun
     if (!Manager->ManaModule->SpendMana(500.0f, TEXT("Potlaceni katastrofy"))) return false;
     if (FChunkData* Chunk = Manager->WorldChunks.Find(ChunkCoord)) {
         Chunk->FaultStress = 0.0f;
-        for (int i = 0; i < Chunk->MicroCells.Num(); i++) {
-            Chunk->MicroCells[i].MagmaPressure = 0.0f;
-            if (Chunk->MicroCells[i].EruptionDaysRemaining > 0.0f) {
-                Chunk->MicroCells[i].EruptionDaysRemaining = 0.0f;
-                Chunk->MicroCells[i].LavaBuffer = 0.0f;
+        for (int i = 0; i < Chunk->StaticCells.Num(); i++) {
+            Chunk->DynamicCells[i].MagmaPressure = 0.0f;
+            if (Chunk->DynamicCells[i].EruptionDaysRemaining > 0.0f) {
+                Chunk->DynamicCells[i].EruptionDaysRemaining = 0.0f;
+                Chunk->DynamicCells[i].LavaBuffer = 0.0f;
             }
         }
         Manager->RegisterVisualChange(ChunkCoord, EChunkVisualDirty::Terrain | EChunkVisualDirty::Cloud, true);

@@ -108,25 +108,25 @@ void UNationSystem::AdaptCultureToEnvironment(FCultureProfile& Culture, FVector2
     int32 CX = FMath::FloorToInt(Position.X / ChunkWorldSize); int32 CY = FMath::FloorToInt(Position.Y / ChunkWorldSize);
     FIntPoint ChunkCoord(CX, CY);
 
-    // OPTIMALIZACE O(1) pøístupu pomocí Find a FIntPoint
     if (FChunkData* Chunk = Manager->WorldChunks.Find(ChunkCoord)) {
         int32 LX = FMath::Clamp(FMath::FloorToInt((Position.X - (CX * ChunkWorldSize)) / CellSize), 0, Manager->ChunkSize - 1);
         int32 LY = FMath::Clamp(FMath::FloorToInt((Position.Y - (CY * ChunkWorldSize)) / CellSize), 0, Manager->ChunkSize - 1);
         int32 Idx = LX + (LY * Manager->ChunkSize);
 
-        if (Chunk->MicroCells.IsValidIndex(Idx)) {
-            const FCellData& Cell = Chunk->MicroCells[Idx];
+        if (Chunk->StaticCells.IsValidIndex(Idx)) {
+            const FCellStaticData& SCell = Chunk->StaticCells[Idx];
+            const FCellDynamicData& DCell = Chunk->DynamicCells[Idx];
             float Rate = 0.05f * DeltaDays;
 
-            if (Cell.SurfaceWater > 0.0f || Cell.Elevation <= Manager->SeaLevel + 50.0f) {
+            if (DCell.SurfaceWater > 0.0f || SCell.Elevation <= Manager->SeaLevel + 50.0f) {
                 Culture.Pillars[ECulturalPillar::Commerce] = FMath::Min(100.0f, Culture.Pillars[ECulturalPillar::Commerce] + Rate * 2.0f);
                 Culture.Pillars[ECulturalPillar::Exploration] = FMath::Min(100.0f, Culture.Pillars[ECulturalPillar::Exploration] + Rate * 1.5f);
             }
-            if (Cell.Elevation > Manager->SeaLevel + 800.0f || Cell.Bedrock == EBedrockType::Rock) {
+            if (SCell.Elevation > Manager->SeaLevel + 800.0f || SCell.Bedrock == EBedrockType::Rock) {
                 Culture.Pillars[ECulturalPillar::Industry] = FMath::Min(100.0f, Culture.Pillars[ECulturalPillar::Industry] + Rate * 2.0f);
                 Culture.Pillars[ECulturalPillar::Militarism] = FMath::Min(100.0f, Culture.Pillars[ECulturalPillar::Militarism] + Rate * 1.0f);
             }
-            if (Cell.FloraDensity > 0.6f) {
+            if (DCell.FloraDensity > 0.6f) {
                 Culture.Pillars[ECulturalPillar::Ecology] = FMath::Min(100.0f, Culture.Pillars[ECulturalPillar::Ecology] + Rate * 2.5f);
                 Culture.Pillars[ECulturalPillar::Spirituality] = FMath::Min(100.0f, Culture.Pillars[ECulturalPillar::Spirituality] + Rate * 1.2f);
             }
