@@ -128,6 +128,9 @@ public:
 	TQueue<FChunkRenderTask, EQueueMode::Mpsc> PendingRenderQueue;
 	TSet<FIntPoint> ActiveGeneratingChunks;
 
+	// OPTIMALIZACE 2: Globální pamìovı blok pro uloení pøedpoèítanıch vıšek
+	TSharedPtr<TArray<struct FPrecomputedTerrain>> GlobalTerrainCache;
+
 	bool GetMutableCellGlobal(int32 GlobalX, int32 GlobalY, FCellData*& OutCell, FIntPoint& OutChunkCoord);
 	bool GetCellGlobal(int32 GlobalX, int32 GlobalY, FCellData& OutCell);
 	bool GetCellGlobalPtr(int32 GlobalX, int32 GlobalY, const FCellData*& OutCell) const;

@@ -353,8 +353,6 @@ struct FChunkData
     UPROPERTY() float FaultStress = 0.0f;
     UPROPERTY() bool bWeatherChanged = false;
     UPROPERTY() double LastWeatherRenderDay = 0.0;
-
-    // NOVÉ (Fáze 3): Pøíznak pro Scheduler, zda chunk obsahuje dynamické prvky (oheò, mìsta, faunu)
     UPROPERTY() bool bIsActiveRegion = false;
 };
 
@@ -427,6 +425,17 @@ struct FContinentData
     UPROPERTY() FVector2D DriftDirection;
 };
 
+// --- OPTIMALIZACE 2: Datová cache pro terén ---
+USTRUCT()
+struct FPrecomputedTerrain
+{
+    GENERATED_BODY()
+    float Elevation = 0.0f;
+    float TectonicPressure = 0.0f;
+    float LavaAmount = 0.0f;
+    bool bIsVolcano = false;
+};
+
 USTRUCT(BlueprintType)
 struct FChunkGenerationParameters
 {
@@ -471,6 +480,11 @@ struct FChunkGenerationParameters
     bool bUseLOD = true;
 
     EWorldViewMode ViewMode = EWorldViewMode::Normal;
+
+    // OPTIMALIZACE 2: Globální precalculated buffer terénu, aby se šum nepoèítal 2x
+    TSharedPtr<TArray<FPrecomputedTerrain>> GlobalTerrainCache;
+    int32 TotalWorldCellsX = 0;
+    int32 TotalWorldCellsY = 0;
 };
 
 struct FChunkGenerationResult
@@ -615,7 +629,6 @@ struct FTribeData
     UPROPERTY(BlueprintReadWrite) bool bHasForcedTarget = false;
     UPROPERTY(BlueprintReadWrite) FVector2D ForcedTarget = FVector2D::ZeroVector;
 
-    // FÁZE 1: Promìnné pro skuteèné stopování lovné zvìøe
     UPROPERTY(BlueprintReadWrite) FVector2D LastKnownHerdPosition = FVector2D::ZeroVector;
     UPROPERTY(BlueprintReadWrite) FVector2D HerdDirection = FVector2D::ZeroVector;
     UPROPERTY(BlueprintReadWrite) float TrackingConfidence = 0.0f;
@@ -691,7 +704,6 @@ struct FAnimalData
     UPROPERTY(BlueprintReadWrite) float Age = 0.0f;
     UPROPERTY(BlueprintReadWrite) float HerdSize = 15.0f;
 
-    // FÁZE 1: Kondice urèuje fyzické zdraví (1.0 = zdravé, 0.0 = zaèínají umírat)
     UPROPERTY(BlueprintReadWrite) float Condition = 1.0f;
 };
 

@@ -191,7 +191,6 @@ void ASimWorldManager::SyncChunkEdges(const TSet<FIntPoint>& ActiveChunks) {
 }
 
 void ASimWorldManager::UpdateActiveRegions() {
-    // OPTIMALIZACE: Ponecháme kapacitu polí, zabrání se realokacím RAM
     ActiveChunkKeys.Empty(WorldChunks.Num());
     StableChunkKeys.Empty(WorldChunks.Num());
 
@@ -377,6 +376,11 @@ FChunkGenerationParameters ASimWorldManager::GetGenerationParams() const {
 
     P.ViewMode = CurrentViewMode;
 
+    // OPTIMALIZACE: Pøedáme Cache do parametrù pro všechny moduly
+    P.GlobalTerrainCache = GlobalTerrainCache;
+    P.TotalWorldCellsX = WorldSizeInChunksX * ChunkSize;
+    P.TotalWorldCellsY = WorldSizeInChunksY * ChunkSize;
+
     return P;
 }
 
@@ -388,25 +392,59 @@ void ASimWorldManager::ProcessNextChunk() {
 
                 if (HydroModule) {
                     WorldChunks.GetKeys(CachedChunkKeys);
-                    TSet<FIntPoint> AllChunksSet(CachedChunkKeys);
-                    for (int32 i = 0; i < 50; ++i) {
-                        HydroModule->ProcessHydroSlice(CachedChunkKeys, WorldChunks, this, 0, CachedChunkKeys.Num(), true, 1.0f);
-                        SyncChunkEdges(AllChunksSet);
+
+                    // OPTIMALIZACE 2: Konec zamrznutí editoru. Zdlouhavá simulace 50 krokù vody se provede asynchronnì na pozadí!
+                    TWeakObjectPtr<ASimWorldManager> WeakThis(this);
+                    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [WeakThis]() {
+                        if (!WeakThis.IsValid()) return;
+                        ASimWorldManager* Manager = WeakThis.Get();
+
+                        TSet<FIntPoint> AllChunksSet(Manager->CachedChunkKeys);
+
+                        for (int32 i = 0; i < 50; ++i) {
+                            Manager->HydroModule->ProcessHydroSlice(Manager->CachedChunkKeys, Manager->WorldChunks, Manager, 0, Manager->CachedChunkKeys.Num(), true, 1.0f);
+                            Manager->SyncChunkEdges(AllChunksSet);
+                        }
+
+                        // Až voda doteèe, asynchronnì "zaklepeme" na GameThread a spustíme zbytek
+                        AsyncTask(ENamedThreads::GameThread, [WeakThis]() {
+                            if (!WeakThis.IsValid()) return;
+                            ASimWorldManager* FinalMain = WeakThis.Get();
+
+                            if (FinalMain->CosmosModule) FinalMain->CosmosModule->InitCosmos(FinalMain);
+                            if (FinalMain->FaunaModule) FinalMain->FaunaModule->InitializeFauna(FinalMain);
+                            if (FinalMain->HumanModule) FinalMain->HumanModule->InitializeHumans(FinalMain);
+                            FinalMain->bCurrentQueueIsFullGeneration = false;
+
+                            for (auto& Pair : FinalMain->WorldChunks) {
+                                FinalMain->RegisterVisualChange(Pair.Key, EChunkVisualDirty::Terrain | EChunkVisualDirty::Water | EChunkVisualDirty::Flora);
+                            }
+
+                            if (FinalMain->SimDirector) {
+                                FinalMain->SimDirector->InitializeDirector(FinalMain);
+                                FinalMain->SimDirector->StartSimulationTimer();
+                            }
+                            if (FinalMain->RendererModule) { FinalMain->RendererModule->UpdateFastEntities(); }
+
+                            // Hotovo! Obrovský pamìový blok (Cache) už nepotøebujeme, mùžeme RAM uvolnit.
+                            FinalMain->GlobalTerrainCache.Reset();
+                            });
+                        });
+                }
+                else {
+                    if (CosmosModule) CosmosModule->InitCosmos(this);
+                    if (FaunaModule) FaunaModule->InitializeFauna(this);
+                    if (HumanModule) HumanModule->InitializeHumans(this);
+                    bCurrentQueueIsFullGeneration = false;
+
+                    for (auto& Pair : WorldChunks) {
+                        RegisterVisualChange(Pair.Key, EChunkVisualDirty::Terrain | EChunkVisualDirty::Water | EChunkVisualDirty::Flora);
                     }
+
+                    if (SimDirector) { SimDirector->InitializeDirector(this); SimDirector->StartSimulationTimer(); }
+                    if (RendererModule) { RendererModule->UpdateFastEntities(); }
+                    GlobalTerrainCache.Reset();
                 }
-
-                if (CosmosModule) CosmosModule->InitCosmos(this);
-
-                if (FaunaModule) FaunaModule->InitializeFauna(this);
-                if (HumanModule) HumanModule->InitializeHumans(this);
-                bCurrentQueueIsFullGeneration = false;
-
-                for (auto& Pair : WorldChunks) {
-                    RegisterVisualChange(Pair.Key, EChunkVisualDirty::Terrain | EChunkVisualDirty::Water | EChunkVisualDirty::Flora);
-                }
-
-                if (SimDirector) { SimDirector->InitializeDirector(this); SimDirector->StartSimulationTimer(); }
-                if (RendererModule) { RendererModule->UpdateFastEntities(); }
             }
         }
         return;
@@ -606,6 +644,16 @@ void ASimWorldManager::RegenerateWorld() {
     if (RendererModule) { RendererModule->ClearAllMeshes(); RendererModule->InitializeRenderer(this); }
 
     GenerateContinentCenters();
+
+    // OPTIMALIZACE 2: Pøed samotným generováním si asynchronnì v jednom zátahu pøedpoèítáme celý šum mapy
+    GlobalTerrainCache = MakeShared<TArray<FPrecomputedTerrain>>();
+    GlobalTerrainCache->SetNumZeroed(WorldSizeInChunksX * ChunkSize * WorldSizeInChunksY * ChunkSize);
+
+    FChunkGenerationParameters CacheParams = GetGenerationParams();
+    CacheParams.TotalWorldCellsX = WorldSizeInChunksX * ChunkSize;
+    CacheParams.TotalWorldCellsY = WorldSizeInChunksY * ChunkSize;
+    UWorldGeneratorSystem::GenerateGlobalTerrainCache(*GlobalTerrainCache, CacheParams);
+
     for (int32 y = 0; y < WorldSizeInChunksY; y++) {
         for (int32 x = 0; x < WorldSizeInChunksX; x++) {
             ChunkGenerationQueue.Enqueue(FIntPoint(x, y));
@@ -653,7 +701,6 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
         }
     }
 
-    // OPTIMALIZACE: Nested loops a DistSquared pro drastické urychlení zemìtøesení
     for (int32 cy = EpicenterChunkCoord.Y - ChunkRadius; cy <= EpicenterChunkCoord.Y + ChunkRadius; cy++) {
         for (int32 cx = EpicenterChunkCoord.X - ChunkRadius; cx <= EpicenterChunkCoord.X + ChunkRadius; cx++) {
             FIntPoint Coord(cx, cy);
@@ -677,7 +724,7 @@ void ASimWorldManager::TriggerEarthquake(FIntPoint EpicenterChunkCoord, float Ra
                             bChunkAffected = true;
                             Chunk->FaultStress *= FMath::FRandRange(0.0f, 0.2f);
 
-                            float Dist = FMath::Sqrt(DistSq); // Drahá odmocnina se volá jen pro buòky, které jsou skuteènì zasaženy
+                            float Dist = FMath::Sqrt(DistSq);
                             float Falloff = FMath::Pow(1.0f - (Dist / Radius), 2.0f);
                             float LocalIntensity = Intensity * Falloff;
 

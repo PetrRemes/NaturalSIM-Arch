@@ -1,6 +1,7 @@
 #include "WorldGeneratorSystem.h"
 #include "SimWorldManager.h"
 #include "NoiseUtils.h"
+#include "Async/ParallelFor.h"
 
 UWorldGeneratorSystem::UWorldGeneratorSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UWorldGeneratorSystem::BeginPlay() { Super::BeginPlay(); }
@@ -25,8 +26,8 @@ static void GetZonedTerrain(float GlobalX, float GlobalY, const FChunkGeneration
         float RadiusMult = (Params.ContinentCount <= 2) ? 1.2f : (1.8f / FMath::Sqrt((float)FMath::Max(1, Params.ContinentCount))) * SizeStream.FRandRange(0.6f, 1.6f);
 
         FVector2D EffCenter = Params.Continents[i].OriginCenter + (Params.Continents[i].DriftDirection * (Params.TectonicShift / 50.0f) * ShiftMultiplier);
-        float D = FVector2D::DistSquared(FVector2D(WarpedX, WarpedY), EffCenter); // OPTIMALIZACE: DistSquared pro rychlé porovnání
-        D = FMath::Sqrt(D) / FMath::Max(0.1f, RadiusMult);
+
+        float D = FMath::Sqrt(FVector2D::DistSquared(FVector2D(WarpedX, WarpedY), EffCenter)) / FMath::Max(0.1f, RadiusMult);
 
         if (D < Dist1) { Dist2 = Dist1; Dist1 = D; }
         else if (D < Dist2) { Dist2 = D; }
@@ -148,7 +149,6 @@ static void GetZonedTerrain(float GlobalX, float GlobalY, const FChunkGeneration
                     float VolcZoneNoise = GetFBM(VolcX, VolcY, Params.NoiseScale * 0.8f, 3, Params.MapSeed + 500);
                     if (VolcZoneNoise < 0.55f) continue;
 
-                    // OPTIMALIZACE: Rychlý squared check pøed odmocninou
                     float DistSq = FVector2D::DistSquared(FVector2D(GlobalX, GlobalY), FVector2D(VolcX, VolcY));
                     float VolcRadius = 25.0f;
                     float VolcRadiusSq = VolcRadius * VolcRadius;
@@ -177,6 +177,24 @@ static void GetZonedTerrain(float GlobalX, float GlobalY, const FChunkGeneration
     OutElev = Elev;
 }
 
+// OPTIMALIZACE 2: Zde se poprvé asynchronnì spoèítá kompletní mapa. Zbytek modulù už jen ète pamì!
+void UWorldGeneratorSystem::GenerateGlobalTerrainCache(TArray<FPrecomputedTerrain>& OutCache, const FChunkGenerationParameters& Params)
+{
+    ParallelFor(Params.TotalWorldCellsY, [&](int32 Y) {
+        for (int32 X = 0; X < Params.TotalWorldCellsX; X++) {
+            float Elev, Tect, Lava;
+            bool Volc;
+            GetZonedTerrain(X, Y, Params, Elev, Volc, Tect, Lava);
+
+            int32 Idx = Y * Params.TotalWorldCellsX + X;
+            OutCache[Idx].Elevation = Elev;
+            OutCache[Idx].bIsVolcano = Volc;
+            OutCache[Idx].TectonicPressure = Tect;
+            OutCache[Idx].LavaAmount = Lava;
+        }
+        });
+}
+
 void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params)
 {
     if (OutChunk.MicroCells.Num() == 0) return;
@@ -184,7 +202,6 @@ void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D 
     int32 ChunkSize = FMath::RoundToInt(FMath::Sqrt((float)OutChunk.MicroCells.Num()));
     float TotalTectPressure = 0.0f;
 
-    // OPTIMALIZACE: Odstranìno pomalé dìlení a modulo uvnitø obøí smyèky
     for (int32 Y = 0; Y < ChunkSize; Y++)
     {
         for (int32 X = 0; X < ChunkSize; X++)
@@ -194,23 +211,25 @@ void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D 
 
             FCellData& Cell = OutChunk.MicroCells[i];
 
-            float GlobalX = (ChunkCoord.X * (ChunkSize - 1)) + X;
-            float GlobalY = (ChunkCoord.Y * (ChunkSize - 1)) + Y;
+            int32 GlobalX = (ChunkCoord.X * (ChunkSize - 1)) + X;
+            int32 GlobalY = (ChunkCoord.Y * (ChunkSize - 1)) + Y;
 
-            bool bIsVolcano = false;
-            float Elevation = 0.0f;
-            float TectonicPressure = 0.0f;
-            float LavaAmount = 0.0f;
+            // OPTIMALIZACE 2: Namísto milionu drahých funkcí GetZonedTerrain jen saháme do pøipravené pamìti!
+            int32 LookupX = FMath::Clamp(GlobalX, 0, Params.TotalWorldCellsX - 1);
+            int32 LookupY = FMath::Clamp(GlobalY, 0, Params.TotalWorldCellsY - 1);
 
-            GetZonedTerrain(GlobalX, GlobalY, Params, Elevation, bIsVolcano, TectonicPressure, LavaAmount);
+            FPrecomputedTerrain CachedT;
+            if (Params.GlobalTerrainCache.IsValid()) {
+                CachedT = Params.GlobalTerrainCache.Get()->GetData()[LookupY * Params.TotalWorldCellsX + LookupX];
+            }
 
-            Cell.Elevation = Elevation;
-            Cell.bIsVolcano = bIsVolcano;
-            Cell.Lava = LavaAmount;
-            TotalTectPressure += TectonicPressure;
+            Cell.Elevation = CachedT.Elevation;
+            Cell.bIsVolcano = CachedT.bIsVolcano;
+            Cell.Lava = CachedT.LavaAmount;
+            TotalTectPressure += CachedT.TectonicPressure;
 
-            if (bIsVolcano || Cell.Lava > 0.1f) {
-                if (bIsVolcano) Cell.Lava = 100.0f;
+            if (Cell.bIsVolcano || Cell.Lava > 0.1f) {
+                if (Cell.bIsVolcano) Cell.Lava = 100.0f;
                 Cell.Bedrock = EBedrockType::Rock;
             }
             else {
@@ -233,7 +252,7 @@ void UWorldGeneratorSystem::ProcessChunkTerrain(FChunkData& OutChunk, FVector2D 
             }
 
             float OreNoise = GetFBM(GlobalX, GlobalY, Params.NoiseScale * 25.0f, 2, Params.MapSeed + 888);
-            float OreThreshold = FMath::Lerp(0.92f, 0.70f, TectonicPressure);
+            float OreThreshold = FMath::Lerp(0.92f, 0.70f, CachedT.TectonicPressure);
             if (Cell.bIsVolcano) OreThreshold -= 0.15f;
 
             if (OreNoise > OreThreshold) {
