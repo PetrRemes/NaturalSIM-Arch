@@ -57,12 +57,11 @@ void USimulationDirector::InitializeScheduler() {
     Scheduler.Add({ ESimSystemTask::Fauna, ERegionMode::All, 0.0f, 12, 0.0f, 0, 0.f, 0.f, 0.f, 12 });
     Scheduler.Add({ ESimSystemTask::Humans, ERegionMode::All, 0.0f, 12, 0.0f, 0, 0.f, 0.f, 0.f, 12 });
 
-    // OPRAVA TIKÁNÍ: Voda už neblokuje celé vlákno. Bìží jen tam, kde je potøeba a je rozdìlena na øezy!
-    Scheduler.Add({ ESimSystemTask::HydroFlow, ERegionMode::Active, 1.0f, 4, 0.0f, 0, 0.f, 0.f, 0.f, 4 });
+    Scheduler.Add({ ESimSystemTask::HydroFlow, ERegionMode::Active, 1.0f, 16, 0.0f, 0, 0.f, 0.f, 0.f, 16 });
     Scheduler.Add({ ESimSystemTask::HydroFlow, ERegionMode::Stable, 5.0f, 8, 0.0f, 0, 0.f, 0.f, 0.f, 8 });
 
-    Scheduler.Add({ ESimSystemTask::HydroGeomorphology, ERegionMode::Active, 15.0f, 4, 0.0f, 0, 0.f, 0.f, 0.f, 4 });
-    Scheduler.Add({ ESimSystemTask::HydroGeomorphology, ERegionMode::Stable, 60.0f, 8, 0.0f, 0, 0.f, 0.f, 0.f, 8 });
+    Scheduler.Add({ ESimSystemTask::HydroGeomorphology, ERegionMode::Active, 15.0f, 32, 0.0f, 0, 0.f, 0.f, 0.f, 32 });
+    Scheduler.Add({ ESimSystemTask::HydroGeomorphology, ERegionMode::Stable, 60.0f, 12, 0.0f, 0, 0.f, 0.f, 0.f, 12 });
 
     Scheduler.Add({ ESimSystemTask::Tectonics, ERegionMode::Active, 5.0f, 5, 0.0f, 0, 0.f, 0.f, 0.f, 5 });
     Scheduler.Add({ ESimSystemTask::Tectonics, ERegionMode::Stable, 30.0f, 15, 0.0f, 0, 0.f, 0.f, 0.f, 15 });
@@ -150,8 +149,12 @@ void USimulationDirector::TickComponent(float DeltaTime, ELevelTick TickType, FA
                     int32 ExtraSlicesNeeded = FMath::CeilToInt(ExecMs / TargetTaskBudgetMs);
                     Sched.TargetSlices = FMath::Min(200, Sched.Slices + ExtraSlicesNeeded);
                 }
-                else if (ExecMs < TargetTaskBudgetMs * 0.4f && Sched.Slices > 1) {
-                    Sched.TargetSlices = FMath::Max(1, Sched.Slices - 1);
+                else if (ExecMs < TargetTaskBudgetMs * 0.4f && Sched.Slices > 12) {
+                    // OPRAVA AUTO-SCALERU: Nikdy nedovolíme klesnout pod 12 øezù.
+                    // A pokud snižujeme, tak jen s 5% šancí, aby systém nebyl zaskoèen náhlým nárùstem zátìže
+                    if (FMath::FRand() < 0.05f) {
+                        Sched.TargetSlices = FMath::Max(12, Sched.Slices - 1);
+                    }
                 }
             }
 
