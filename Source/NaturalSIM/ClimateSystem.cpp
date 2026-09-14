@@ -13,39 +13,41 @@ void UClimateSystem::BeginPlay()
     Super::BeginPlay();
 }
 
-// OPTIMALIZACE: Zero-Allocation okolní cache, likviduje desetitisíce volání TMap uvnitø inner loopu
-namespace {
-    struct FClimateNeighborhood {
-        const FChunkData* Chunks[3][3];
-        int32 ChunkDim;
-        int32 CSize;
+struct FClimateNeighborhood {
+    const FChunkData* Chunks[3][3];
+    int32 ChunkDim;
+    int32 CSize;
 
-        void Initialize(ASimWorldManager* Manager, FIntPoint CenterCoord, int32 InChunkSize) {
-            ChunkDim = InChunkSize;
-            CSize = InChunkSize - 1;
-            for (int32 cy = -1; cy <= 1; cy++) {
-                for (int32 cx = -1; cx <= 1; cx++) {
-                    Chunks[cy + 1][cx + 1] = Manager->WorldChunks.Find(FIntPoint(CenterCoord.X + cx, CenterCoord.Y + cy));
-                }
+    void Initialize(ASimWorldManager* Manager, FIntPoint CenterCoord, int32 InChunkSize) {
+        ChunkDim = InChunkSize;
+        CSize = InChunkSize - 1;
+        for (int32 cy = -1; cy <= 1; cy++) {
+            for (int32 cx = -1; cx <= 1; cx++) {
+                Chunks[cy + 1][cx + 1] = Manager->WorldChunks.Find(FIntPoint(CenterCoord.X + cx, CenterCoord.Y + cy));
             }
         }
+    }
 
-        FORCEINLINE const FCellDynamicData* GetDynamic(int32 lx, int32 ly) const {
-            int32 GridX = 1; int32 GridY = 1;
-
-            if (lx < 0) { GridX = 0; lx += CSize; }
-            else if (lx >= CSize) { GridX = 2; lx -= CSize; }
-
-            if (ly < 0) { GridY = 0; ly += CSize; }
-            else if (ly >= CSize) { GridY = 2; ly -= CSize; }
-
-            if (const FChunkData* TargetChunk = Chunks[GridY][GridX]) {
-                return &TargetChunk->DynamicCells[lx + ly * ChunkDim];
-            }
-            return nullptr;
+    FORCEINLINE const FCellDynamicData* GetDynamic(int32 lx, int32 ly) const {
+        // OPTIMALIZACE: Rychlý pøístup pro 96 % bunìk uvnitø vlastního chunku
+        if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
+            return &Chunks[1][1]->DynamicCells[lx + ly * ChunkDim];
         }
-    };
-}
+
+        int32 GridX = 1; int32 GridY = 1;
+
+        if (lx < 0) { GridX = 0; lx += CSize; }
+        else if (lx >= CSize) { GridX = 2; lx -= CSize; }
+
+        if (ly < 0) { GridY = 0; ly += CSize; }
+        else if (ly >= CSize) { GridY = 2; ly -= CSize; }
+
+        if (const FChunkData* TargetChunk = Chunks[GridY][GridX]) {
+            return &TargetChunk->DynamicCells[lx + ly * ChunkDim];
+        }
+        return nullptr;
+    }
+};
 
 void UClimateSystem::ProcessChunkClimate(FChunkData& OutChunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params)
 {

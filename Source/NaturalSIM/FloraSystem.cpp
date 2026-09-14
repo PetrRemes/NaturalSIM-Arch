@@ -20,7 +20,6 @@ struct FFloraNeighborhood {
     }
 
     FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
-        // FAST-PATH: Zamezení branchingu pro 96 % bunìk uvnitø chunku
         if (lx >= 0 && lx < CS && ly >= 0 && ly < CS) {
             int32 Idx = lx + ly * CS;
             OutS = &Chunks[1][1]->StaticCells[Idx];
@@ -289,7 +288,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
         float GridMeadow[5][5];
         float GridBush[5][5];
         float GridSnow[5][5];
-        // OPTIMALIZACE: Grid pro ForestSuitability, odstraòuje 10 000 volání PerlinNoise2D z hot-loopu
         float GridForest[5][5];
 
         for (int gy = 0; gy < GridNodes; gy++) {
@@ -315,10 +313,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 FCellDynamicData& DCell = Chunk.DynamicCells[i];
                 int32 GlobalX = (ChunkKeys[idx].X * CSize) + X; int32 GlobalY = (ChunkKeys[idx].Y * CSize) + Y;
 
-                auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-                    Halo.GetNeighbor(X + dx, Y + dy, OutS, OutD);
-                    };
-
                 int32 gx = FMath::Min(X / StepSize, GridSegments - 1);
                 int32 gy = FMath::Min(Y / StepSize, GridSegments - 1);
                 float tx = (float)(X - (gx * StepSize)) / StepSize;
@@ -330,6 +324,20 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 float Altitude = SCell.Elevation - Manager->SeaLevel;
 
                 DCell.FireIntensityBuffer = DCell.FireIntensity;
+
+                // OPTIMALIZACE 2: Bezpeèné stahování ohnì od sousedù (Pull-Logic), odstranìní nebezpeèného TMap::Find
+                if (DCell.FireIntensity == 0.0f && DCell.FloraDensity > 0.2f && DCell.SurfaceWater < 1.0f) {
+                    for (int32 dir = 0; dir < 4; dir++) {
+                        const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
+                        Halo.GetNeighbor(X + Offsets[dir][0], Y + Offsets[dir][1], NCellS, NCellD);
+                        if (NCellD && NCellD->FireIntensity > 0.3f) {
+                            if (ChunkStream.FRand() < 0.3f * DeltaDays) {
+                                DCell.FireIntensityBuffer = NCellD->FireIntensity - 0.2f;
+                                break;
+                            }
+                        }
+                    }
+                }
 
                 float Toxicity = FMath::Clamp((DCell.WaterPollution * 1.5f) + (DCell.AshDensityBuffer * 0.25f), 0.0f, 1.0f);
                 float MixNoise = BiLerp(GridMix[gy][gx], GridMix[gy][gx + 1], GridMix[gy + 1][gx], GridMix[gy + 1][gx + 1], tx, ty);
@@ -389,11 +397,21 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                     continue;
                 }
 
+                // OPTIMALIZACE 3: Slouèení dvou 4x sousedských for-cyklù do jednoho (polovièní zátìž cache)
                 float LocalSlope = 0.0f;
+                float NeighborSeeds = 0.0f, NeighborShrubs = 0.0f;
+
                 for (int32 dir = 0; dir < 4; dir++) {
                     const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                    GetNeighbor(Offsets[dir][0], Offsets[dir][1], NCellS, NCellD);
-                    if (NCellS) { float s = FMath::Abs(SCell.Elevation - NCellS->Elevation); if (s > LocalSlope) LocalSlope = s; }
+                    Halo.GetNeighbor(X + Offsets[dir][0], Y + Offsets[dir][1], NCellS, NCellD);
+                    if (NCellS) {
+                        float s = FMath::Abs(SCell.Elevation - NCellS->Elevation);
+                        if (s > LocalSlope) LocalSlope = s;
+                    }
+                    if (NCellD) {
+                        if (NCellD->WoodAmount > 100.0f) NeighborSeeds += 0.05f;
+                        if (NCellD->ShrubDensity > 0.5f) NeighborShrubs += 0.05f;
+                    }
                 }
                 LocalSlope *= 0.02f;
 
@@ -412,7 +430,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 else if (Altitude < 1200.0f) OrographicBonus = 0.5f;
                 else OrographicBonus = -1.0f * ((Altitude - 1200.0f) / 400.0f);
 
-                // OPTIMALIZACE: Aplikace bilerp šumu i pro ForestSuitability
                 float ForestNoise = BiLerp(GridForest[gy][gx], GridForest[gy][gx + 1], GridForest[gy + 1][gx], GridForest[gy + 1][gx + 1], tx, ty);
                 float ForestSuitability = WaterAvailability + SoilQuality - LocalSlope + ForestNoise + OrographicBonus;
 
@@ -431,15 +448,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                     }
                 }
 
-                float NeighborSeeds = 0.0f, NeighborShrubs = 0.0f;
-                for (int32 dir = 0; dir < 4; dir++) {
-                    const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
-                    GetNeighbor(Offsets[dir][0], Offsets[dir][1], NCellS, NCellD);
-                    if (NCellD) {
-                        if (NCellD->WoodAmount > 100.0f) NeighborSeeds += 0.05f;
-                        if (NCellD->ShrubDensity > 0.5f) NeighborShrubs += 0.05f;
-                    }
-                }
                 DCell.TreeSeedBank = FMath::Clamp(DCell.TreeSeedBank + (NeighborSeeds - 0.01f) * DeltaDays, 0.0f, 1.0f);
                 DCell.ShrubSeedBank = FMath::Clamp(DCell.ShrubSeedBank + (NeighborShrubs - 0.01f) * DeltaDays, 0.0f, 1.0f);
                 DCell.SeedSpread = DCell.TreeSeedBank;
@@ -574,14 +582,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 }
 
                 if (DCell.FireIntensity > 0.0f) {
-                    if (ChunkStream.FRand() < 0.3f * DeltaDays && DCell.FireIntensity > 0.3f) {
-                        int32 dir = ChunkStream.RandRange(0, 3);
-                        FCellStaticData* NCellS = nullptr; FCellDynamicData* NCellD = nullptr; FIntPoint NCoord;
-                        if (Manager->GetMutableCellGlobal(GlobalX + Offsets[dir][0], GlobalY + Offsets[dir][1], NCellS, NCellD, NCoord)) {
-                            if (NCellD->FloraDensity > 0.2f && NCellD->SurfaceWater < 1.0f && NCellD->FireIntensity == 0.0f) NCellD->FireIntensity = DCell.FireIntensity - 0.2f;
-                        }
-                    }
-
                     DCell.GrassDensity = 0.0f;
                     DCell.ShrubDensity = 0.0f;
                     DCell.BerryBushes = 0.0f;
@@ -595,9 +595,9 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                         LocalDirty |= EChunkVisualDirty::Flora;
                     }
 
-                    DCell.FireIntensity -= ((DCell.Rainfall * 0.5f) + 0.5f) * DeltaDays;
-                    if (DCell.Lava > 0.1f) DCell.FireIntensity = 1.0f;
-                    if (DCell.FireIntensity < 0.0f) DCell.FireIntensity = 0.0f;
+                    DCell.FireIntensityBuffer -= ((DCell.Rainfall * 0.5f) + 0.5f) * DeltaDays;
+                    if (DCell.Lava > 0.1f) DCell.FireIntensityBuffer = 1.0f;
+                    if (DCell.FireIntensityBuffer < 0.0f) DCell.FireIntensityBuffer = 0.0f;
 
                     LocalDirty |= EChunkVisualDirty::Flora;
                 }
@@ -669,6 +669,13 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
             FScopeLock Lock(&ManaMutex);
             if (LocalBirths > 0.0f) Manager->ManaModule->AccumulateLifeMana(LocalBirths * 10.0f, EManaSourceType::FloraBirth);
             if (LocalDeaths > 0.0f) Manager->ManaModule->AccumulateLifeMana(LocalDeaths * 10.0f, EManaSourceType::FloraDeath);
+        }
+
+        for (int32 Y = 0; Y < CSize; Y++) {
+            for (int32 X = 0; X < CSize; X++) {
+                int32 i = X + Y * Manager->ChunkSize;
+                Chunk.DynamicCells[i].FireIntensity = Chunk.DynamicCells[i].FireIntensityBuffer;
+            }
         }
 
         for (int32 step = 0; step < Manager->ChunkSize; step++) {
