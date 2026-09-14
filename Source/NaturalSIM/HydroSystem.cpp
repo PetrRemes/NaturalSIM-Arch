@@ -8,7 +8,7 @@
 UHydroSystem::UHydroSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UHydroSystem::BeginPlay() { Super::BeginPlay(); }
 
-struct FChunkNeighborhood {
+struct FHydroNeighborhood {
     const FChunkData* Chunks[3][3];
     int32 CS;
 
@@ -353,15 +353,16 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
     int32 Offsets[8][2] = { {0,1}, {1,0}, {0,-1}, {-1,0}, {1,1}, {-1,-1}, {1,-1}, {-1,1} };
     int32 CSize = Manager->ChunkSize - 1;
 
+    FVector2D PrecomputedDirs[8];
+    for (int32 i = 0; i < 8; i++) {
+        PrecomputedDirs[i] = FVector2D(Offsets[i][0], Offsets[i][1]).GetSafeNormal();
+    }
+
     float TidalMultiplier = 1.0f;
     if (Manager->CosmosModule) {
         TidalMultiplier = Manager->CosmosModule->CurrentState.GlobalTidalMultiplier;
     }
 
-    // ----------------------------------------------------
-    // FÁZE 1: FLOW DIRECTION (Smìrování vody)
-    // OPRAVA CHYBY: ParallelFor musí jet POUZE od 0 do (EndIdx - StartIdx), nikoliv pøes všechny chunky!
-    // ----------------------------------------------------
     ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
@@ -369,7 +370,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         if (!WorldChunks.Contains(Coord)) return;
         FChunkData& Chunk = WorldChunks[Coord];
 
-        FChunkNeighborhood Halo;
+        FHydroNeighborhood Halo;
         Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
         for (int32 Y = 0; Y < CSize; Y++) {
@@ -468,9 +469,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
 
     const float FlowCoefficient = 0.18f;
 
-    // ----------------------------------------------------
-    // FÁZE 2: WATER TRANSFER (Pøenos vody a síly proudu)
-    // ----------------------------------------------------
     ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
@@ -478,7 +476,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         if (!WorldChunks.Contains(Coord)) return;
         FChunkData& Chunk = WorldChunks[Coord];
 
-        FChunkNeighborhood Halo;
+        FHydroNeighborhood Halo;
         Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
         float LocalFlowCoefficient = Chunk.bGeomorphologyDirty ? 0.8f : FlowCoefficient;
@@ -596,9 +594,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         TArray<uint8> SafeFlags;
         SafeFlags.Init(0, EndIdx - StartIdx);
 
-        // ----------------------------------------------------
-        // FÁZE 4: GEOMORPHOLOGY (Vodní eroze a naplaveniny)
-        // ----------------------------------------------------
         ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
             int32 idx = StartIdx + iter;
             if (!ChunkKeys.IsValidIndex(idx)) return;
@@ -606,7 +601,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             if (!WorldChunks.Contains(Coord)) return;
             FChunkData& Chunk = WorldChunks[Coord];
 
-            FChunkNeighborhood Halo;
+            FHydroNeighborhood Halo;
             Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
             for (int32 Y = 0; Y < CSize; Y++) {
@@ -660,26 +655,29 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                             Halo.GetNeighbor(X + Offsets[n][0], Y + Offsets[n][1], NCellS, NCellD);
 
                             if (NCellS && NCellD && NCellD->RiverDischarge > 1.0f && NCellD->SurfaceWater > 0.1f) {
-                                FVector2D DirToMe(-Offsets[n][0], -Offsets[n][1]); DirToMe.Normalize();
-                                FVector2D NOutflow(0, 0);
+                                FVector2D DirToMe = -PrecomputedDirs[n];
+                                FVector2D NOutflow = FVector2D::ZeroVector;
+
                                 if (NCellS->FlowDirectionGlobalX != -1) {
-                                    NOutflow = FVector2D(NCellS->FlowDirectionGlobalX - NX, NCellS->FlowDirectionGlobalY - NY).GetSafeNormal();
+                                    float dx = NCellS->FlowDirectionGlobalX - NX;
+                                    float dy = NCellS->FlowDirectionGlobalY - NY;
+                                    NOutflow = FVector2D(dx, dy).GetSafeNormal();
                                 }
 
                                 if (FVector2D::DotProduct(NOutflow, DirToMe) < 0.5f) {
-                                    FVector2D NInflowMom(0, 0);
+                                    FVector2D NInflowMom = FVector2D::ZeroVector;
                                     for (int32 nn = 0; nn < 8; nn++) {
                                         int32 relDX = Offsets[n][0] + Offsets[nn][0]; int32 relDY = Offsets[n][1] + Offsets[nn][1];
                                         const FCellStaticData* UpstreamS = nullptr; const FCellDynamicData* UpstreamD = nullptr;
                                         Halo.GetNeighbor(X + relDX, Y + relDY, UpstreamS, UpstreamD);
 
                                         if (UpstreamS && UpstreamD && UpstreamS->FlowDirectionGlobalX == NX && UpstreamS->FlowDirectionGlobalY == NY) {
-                                            NInflowMom += FVector2D(-Offsets[nn][0], -Offsets[nn][1]) * UpstreamD->WaterFlow;
+                                            NInflowMom += -PrecomputedDirs[nn] * UpstreamD->WaterFlow;
                                         }
                                     }
 
                                     if (!NInflowMom.IsNearlyZero()) {
-                                        NInflowMom.Normalize();
+                                        NInflowMom = NInflowMom.GetSafeNormal();
                                         float HitDot = FVector2D::DotProduct(NInflowMom, DirToMe);
 
                                         if (HitDot > 0.6f) BankErosion += NCellD->RiverDischarge * HitDot * 0.002f * DeltaDays * Manager->ErosionMultiplier;
@@ -706,72 +704,75 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                         }
                     }
 
-                    float DepthPenalty = FMath::Clamp(1.0f - (SCell.ChannelDepth / 5.0f), 0.05f, 1.0f);
-                    float BaseLevelPenalty = FMath::Clamp((SCell.Elevation - Manager->SeaLevel) / 50.0f, 0.0f, 1.0f);
-                    float VegetationProtection = FMath::Clamp(0.2f + DCell.ForestDensity * 0.7f + DCell.FloraDensity * 0.2f, 0.0f, 1.0f);
+                    if (DCell.WaterFlow > 0.01f || DCell.Sediment > 0.01f || DCell.SurfaceWater > 0.01f) {
 
-                    float Slope = 0.0f;
-                    bool bFlowsToOcean = false;
+                        float DepthPenalty = FMath::Clamp(1.0f - (SCell.ChannelDepth / 5.0f), 0.05f, 1.0f);
+                        float BaseLevelPenalty = FMath::Clamp((SCell.Elevation - Manager->SeaLevel) / 50.0f, 0.0f, 1.0f);
+                        float VegetationProtection = FMath::Clamp(0.2f + DCell.ForestDensity * 0.7f + DCell.FloraDensity * 0.2f, 0.0f, 1.0f);
 
-                    if (SCell.FlowDirectionGlobalX != -1) {
-                        int32 FlowDX = SCell.FlowDirectionGlobalX - GlobalX;
-                        int32 FlowDY = SCell.FlowDirectionGlobalY - GlobalY;
+                        float Slope = 0.0f;
+                        bool bFlowsToOcean = false;
 
-                        const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
-                        Halo.GetNeighbor(X + FlowDX, Y + FlowDY, TargetCellS, TargetCellD);
+                        if (SCell.FlowDirectionGlobalX != -1) {
+                            int32 FlowDX = SCell.FlowDirectionGlobalX - GlobalX;
+                            int32 FlowDY = SCell.FlowDirectionGlobalY - GlobalY;
 
-                        if (TargetCellS && TargetCellD) {
-                            Slope = FMath::Max(0.0f, (SCell.Elevation + DCell.SurfaceWater) - (TargetCellS->Elevation + TargetCellD->SurfaceWater));
-                            if (TargetCellS->WaterType == EWaterType::Ocean || TargetCellS->Elevation <= Manager->SeaLevel) {
-                                bFlowsToOcean = true;
-                                Slope = FMath::Min(Slope, 0.01f);
+                            const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
+                            Halo.GetNeighbor(X + FlowDX, Y + FlowDY, TargetCellS, TargetCellD);
+
+                            if (TargetCellS && TargetCellD) {
+                                Slope = FMath::Max(0.0f, (SCell.Elevation + DCell.SurfaceWater) - (TargetCellS->Elevation + TargetCellD->SurfaceWater));
+                                if (TargetCellS->WaterType == EWaterType::Ocean || TargetCellS->Elevation <= Manager->SeaLevel) {
+                                    bFlowsToOcean = true;
+                                    Slope = FMath::Min(Slope, 0.01f);
+                                }
                             }
                         }
-                    }
 
-                    float ElevAboveSea = FMath::Max(0.0f, SCell.Elevation - Manager->SeaLevel);
-                    float LowlandFactor = FMath::Clamp(1.0f - (ElevAboveSea / 250.0f), 0.0f, 1.0f);
+                        float ElevAboveSea = FMath::Max(0.0f, SCell.Elevation - Manager->SeaLevel);
+                        float LowlandFactor = FMath::Clamp(1.0f - (ElevAboveSea / 250.0f), 0.0f, 1.0f);
 
-                    float CapacityMultiplier = FMath::Lerp(0.8f, 0.1f, LowlandFactor);
-                    if (bFlowsToOcean) CapacityMultiplier *= 0.4f;
+                        float CapacityMultiplier = FMath::Lerp(0.8f, 0.1f, LowlandFactor);
+                        if (bFlowsToOcean) CapacityMultiplier *= 0.4f;
 
-                    float SedimentCapacity = DCell.WaterFlow * FMath::Max(0.01f, Slope) * CapacityMultiplier;
-                    if (bIsFlooding) SedimentCapacity *= 3.0f;
+                        float SedimentCapacity = DCell.WaterFlow * FMath::Max(0.01f, Slope) * CapacityMultiplier;
+                        if (bIsFlooding) SedimentCapacity *= 3.0f;
 
-                    if (DCell.Sediment <= SedimentCapacity && DCell.WaterFlow > 0.1f && Slope > 0.02f && !bFlowsToOcean) {
-                        float LocalErosionMult = Manager->ErosionMultiplier * FMath::Lerp(1.0f, 0.05f, LowlandFactor) * DepthPenalty * BaseLevelPenalty * (1.0f - VegetationProtection);
-                        if (bIsFlooding) LocalErosionMult *= (SCell.ChannelDepth < 1.0f) ? 15.0f : 5.0f;
+                        if (DCell.Sediment <= SedimentCapacity && DCell.WaterFlow > 0.1f && Slope > 0.02f && !bFlowsToOcean) {
+                            float LocalErosionMult = Manager->ErosionMultiplier * FMath::Lerp(1.0f, 0.05f, LowlandFactor) * DepthPenalty * BaseLevelPenalty * (1.0f - VegetationProtection);
+                            if (bIsFlooding) LocalErosionMult *= (SCell.ChannelDepth < 1.0f) ? 15.0f : 5.0f;
 
-                        float ErosionPotential = (SedimentCapacity - DCell.Sediment) * ErosionCoefficient * LocalErosionMult;
+                            float ErosionPotential = (SedimentCapacity - DCell.Sediment) * ErosionCoefficient * LocalErosionMult;
 
-                        float ActualErode = FMath::Min(ErosionPotential / MaterialResistance, 0.25f * DeltaDays);
-                        float MaxAllowedErosion = FMath::Max(0.0f, SCell.Elevation - Manager->SeaLevel);
-                        ActualErode = FMath::Min(ActualErode, MaxAllowedErosion);
+                            float ActualErode = FMath::Min(ErosionPotential / MaterialResistance, 0.25f * DeltaDays);
+                            float MaxAllowedErosion = FMath::Max(0.0f, SCell.Elevation - Manager->SeaLevel);
+                            ActualErode = FMath::Min(ActualErode, MaxAllowedErosion);
 
-                        if (ActualErode > 0.0f) {
-                            DCell.ElevationDelta -= ActualErode;
-                            DCell.SedimentDelta += ActualErode;
-                            Chunk.AccumulatedTerrainChange += ActualErode;
+                            if (ActualErode > 0.0f) {
+                                DCell.ElevationDelta -= ActualErode;
+                                DCell.SedimentDelta += ActualErode;
+                                Chunk.AccumulatedTerrainChange += ActualErode;
+                            }
                         }
-                    }
-                    else if (DCell.Sediment > SedimentCapacity && DCell.SurfaceWater > 0.05f) {
-                        float Excess = DCell.Sediment - SedimentCapacity;
-                        float DepositFactor = FMath::Lerp(0.2f, 1.0f, LowlandFactor) * FMath::Clamp(1.0f - (Slope / 2.0f), 0.5f, 1.0f);
-                        float Deposit = Excess * DepositFactor * DepositionRate * DeltaDays;
-                        Deposit = FMath::Min(Deposit, 0.05f * DeltaDays);
+                        else if (DCell.Sediment > SedimentCapacity && DCell.SurfaceWater > 0.05f) {
+                            float Excess = DCell.Sediment - SedimentCapacity;
+                            float DepositFactor = FMath::Lerp(0.2f, 1.0f, LowlandFactor) * FMath::Clamp(1.0f - (Slope / 2.0f), 0.5f, 1.0f);
+                            float Deposit = Excess * DepositFactor * DepositionRate * DeltaDays;
+                            Deposit = FMath::Min(Deposit, 0.05f * DeltaDays);
 
-                        DCell.ElevationDelta += Deposit;
-                        DCell.DepositedSediment += Deposit;
-                        DCell.SedimentDelta -= Deposit;
-                        Chunk.AccumulatedTerrainChange += Deposit;
-                    }
+                            DCell.ElevationDelta += Deposit;
+                            DCell.DepositedSediment += Deposit;
+                            DCell.SedimentDelta -= Deposit;
+                            Chunk.AccumulatedTerrainChange += Deposit;
+                        }
 
-                    float MySedimentOutflow = 0.0f;
-                    if (SCell.FlowDirectionGlobalX != -1) {
-                        float TransportFactor = FMath::Lerp(0.8f, 0.2f, LowlandFactor);
-                        MySedimentOutflow = FMath::Min(DCell.Sediment, DCell.WaterFlow * TransportFactor * DeltaDays);
+                        float MySedimentOutflow = 0.0f;
+                        if (SCell.FlowDirectionGlobalX != -1) {
+                            float TransportFactor = FMath::Lerp(0.8f, 0.2f, LowlandFactor);
+                            MySedimentOutflow = FMath::Min(DCell.Sediment, DCell.WaterFlow * TransportFactor * DeltaDays);
+                        }
+                        DCell.SedimentDelta -= MySedimentOutflow;
                     }
-                    DCell.SedimentDelta -= MySedimentOutflow;
                 }
             }
             });
@@ -794,9 +795,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             }
             });
 
-        // ----------------------------------------------------
-        // FÁZE 6: SEDIMENT INFLOW (Sbìr naplavenin)
-        // ----------------------------------------------------
         ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
             int32 idx = StartIdx + iter;
             if (!ChunkKeys.IsValidIndex(idx)) return;
@@ -804,7 +802,7 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             if (!WorldChunks.Contains(Coord)) return;
             FChunkData& Chunk = WorldChunks[Coord];
 
-            FChunkNeighborhood Halo;
+            FHydroNeighborhood Halo;
             Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
             for (int32 Y = 0; Y < CSize; Y++) {

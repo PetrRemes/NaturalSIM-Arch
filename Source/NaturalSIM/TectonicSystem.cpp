@@ -161,25 +161,29 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                 float MyLavaDelta = 0.0f;
                 float MyHead = SCell.Elevation + DCell.Lava;
 
-                FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY, X, Y);
+                // OPTIMALIZACE: Provádíme pøesun lávy pouze pokud buòka nìjakou obsahuje
+                if (DCell.Lava > 0.001f) {
+                    FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY, X, Y);
 
-                if (TargetFlow.X != GlobalX || TargetFlow.Y != GlobalY) {
-                    int32 flowLx = X + (TargetFlow.X - GlobalX);
-                    int32 flowLy = Y + (TargetFlow.Y - GlobalY);
+                    if (TargetFlow.X != GlobalX || TargetFlow.Y != GlobalY) {
+                        int32 flowLx = X + (TargetFlow.X - GlobalX);
+                        int32 flowLy = Y + (TargetFlow.Y - GlobalY);
 
-                    const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
-                    Halo.GetNeighbor(flowLx, flowLy, TargetCellS, TargetCellD);
+                        const FCellStaticData* TargetCellS = nullptr; const FCellDynamicData* TargetCellD = nullptr;
+                        Halo.GetNeighbor(flowLx, flowLy, TargetCellS, TargetCellD);
 
-                    if (TargetCellS && TargetCellD) {
-                        float TargetHead = TargetCellS->Elevation + TargetCellD->Lava;
-                        float Diff = MyHead - TargetHead;
+                        if (TargetCellS && TargetCellD) {
+                            float TargetHead = TargetCellS->Elevation + TargetCellD->Lava;
+                            float Diff = MyHead - TargetHead;
 
-                        float Transfer = FMath::Min(DCell.Lava, Diff * 5.0f * DeltaDays);
-                        Transfer = FMath::Min(Transfer, DCell.Lava * 0.9f);
-                        MyLavaDelta -= Transfer;
+                            float Transfer = FMath::Min(DCell.Lava, Diff * 5.0f * DeltaDays);
+                            Transfer = FMath::Min(Transfer, DCell.Lava * 0.9f);
+                            MyLavaDelta -= Transfer;
+                        }
                     }
                 }
 
+                // OPTIMALIZACE: Kontrolujeme pøíliv pouze od sousedù, kteøí reálnì lávu mají
                 for (int32 n = 0; n < 8; n++) {
                     int32 nx = GlobalX + Offsets[n][0];
                     int32 ny = GlobalY + Offsets[n][1];
@@ -189,7 +193,7 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                     const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
                     Halo.GetNeighbor(nlx, nly, NCellS, NCellD);
 
-                    if (NCellS && NCellD && NCellD->Lava > 0.0f) {
+                    if (NCellS && NCellD && NCellD->Lava > 0.001f) {
                         FIntPoint NeighborTarget = GetLowestNeighbor(nx, ny, nlx, nly);
                         if (NeighborTarget.X == GlobalX && NeighborTarget.Y == GlobalY) {
                             float nHead = NCellS->Elevation + NCellD->Lava;

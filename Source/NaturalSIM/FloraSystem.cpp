@@ -6,6 +6,41 @@
 UFloraSystem::UFloraSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UFloraSystem::BeginPlay() { Super::BeginPlay(); }
 
+struct FFloraNeighborhood {
+    const FChunkData* Chunks[3][3];
+    int32 CS;
+
+    void Initialize(ASimWorldManager* Manager, FIntPoint CenterCoord, int32 InCS) {
+        CS = InCS;
+        for (int32 cy = -1; cy <= 1; cy++) {
+            for (int32 cx = -1; cx <= 1; cx++) {
+                Chunks[cy + 1][cx + 1] = Manager->WorldChunks.Find(FIntPoint(CenterCoord.X + cx, CenterCoord.Y + cy));
+            }
+        }
+    }
+
+    FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
+        int32 GridX = 1; int32 GridY = 1;
+        int32 LocalX = lx; int32 LocalY = ly;
+
+        if (lx < 0) { GridX = 0; LocalX = lx + CS; }
+        else if (lx >= CS) { GridX = 2; LocalX = lx - CS; }
+
+        if (ly < 0) { GridY = 0; LocalY = ly + CS; }
+        else if (ly >= CS) { GridY = 2; LocalY = ly - CS; }
+
+        if (const FChunkData* TargetChunk = Chunks[GridY][GridX]) {
+            int32 Idx = LocalX + LocalY * CS;
+            OutS = &TargetChunk->StaticCells[Idx];
+            OutD = &TargetChunk->DynamicCells[Idx];
+        }
+        else {
+            OutS = nullptr;
+            OutD = nullptr;
+        }
+    }
+};
+
 const UFloraSpeciesData* UFloraSystem::GetSpeciesByID(uint8 ID) const
 {
     if (ID == 0) return nullptr;
@@ -224,6 +259,13 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
         float LocalDeaths = 0.0f;
         int32 Offsets[4][2] = { {0,1}, {1,0}, {0,-1}, {-1,0} };
 
+        FFloraNeighborhood Halo;
+        Halo.Initialize(Manager, ChunkKeys[idx], Manager->ChunkSize);
+
+        uint32 ChunkHashSeed = Manager->MapSeed + (ChunkKeys[idx].X * 374761393U) + (ChunkKeys[idx].Y * 668265263U) + Manager->CurrentDay;
+        ChunkHashSeed = (ChunkHashSeed ^ (ChunkHashSeed >> 13)) * 1274126177U;
+        FRandomStream ChunkStream(ChunkHashSeed);
+
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
@@ -232,21 +274,8 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 FCellDynamicData& DCell = Chunk.DynamicCells[i];
                 int32 GlobalX = (ChunkKeys[idx].X * CSize) + X; int32 GlobalY = (ChunkKeys[idx].Y * CSize) + Y;
 
-                uint32 HashSeed = Manager->MapSeed + (GlobalX * 374761393U) + (GlobalY * 668265263U) + Manager->CurrentDay;
-                HashSeed = (HashSeed ^ (HashSeed >> 13)) * 1274126177U;
-                FRandomStream CellStream(HashSeed);
-
                 auto GetNeighbor = [&](int32 dx, int32 dy, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) {
-                    int32 lx = X + dx; int32 ly = Y + dy;
-                    if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
-                        int32 nIdx = lx + ly * Manager->ChunkSize;
-                        OutS = &Chunk.StaticCells[nIdx];
-                        OutD = &Chunk.DynamicCells[nIdx];
-                        return;
-                    }
-                    FIntPoint Dummy; FCellStaticData* S = nullptr; FCellDynamicData* D = nullptr;
-                    Manager->GetMutableCellGlobal(GlobalX + dx, GlobalY + dy, S, D, Dummy);
-                    OutS = S; OutD = D;
+                    Halo.GetNeighbor(X + dx, Y + dy, OutS, OutD);
                     };
 
                 ETreeType OldTree = SCell.TreeType;
@@ -442,9 +471,9 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                     }
 
                     if (SCell.TreeType == ETreeType::None && EffectiveSeedSpread > 0.05f && ForestSuitability > 0.6f && !bIsMeadow) {
-                        if (CellStream.FRand() < (0.015f * EffectiveSeedSpread * Manager->FloraGrowthSpeed * DeltaDays)) {
+                        if (ChunkStream.FRand() < (0.015f * EffectiveSeedSpread * Manager->FloraGrowthSpeed * DeltaDays)) {
 
-                            const UFloraSpeciesData* NewSpecies = GetBestSpeciesForEnvironment(TargetBiome, Toxicity, SCell.SoilDepth, CellStream);
+                            const UFloraSpeciesData* NewSpecies = GetBestSpeciesForEnvironment(TargetBiome, Toxicity, SCell.SoilDepth, ChunkStream);
                             if (NewSpecies) {
                                 SCell.TreeSpeciesID = NewSpecies->SpeciesID;
                                 SCell.TreeType = NewSpecies->VisualModel;
@@ -452,11 +481,11 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                             else {
                                 if (DCell.Temperature > 22.0f && EffAlt < 400.0f) { SCell.TreeType = ETreeType::Jungle; SCell.TreeSpeciesID = 6; }
                                 else if (DCell.Temperature > 14.0f && EffAlt < 700.0f) {
-                                    if (CellStream.FRand() > 0.4f) { SCell.TreeType = ETreeType::Oak; SCell.TreeSpeciesID = 1; }
+                                    if (ChunkStream.FRand() > 0.4f) { SCell.TreeType = ETreeType::Oak; SCell.TreeSpeciesID = 1; }
                                     else { SCell.TreeType = ETreeType::Birch; SCell.TreeSpeciesID = 2; }
                                 }
                                 else {
-                                    if (CellStream.FRand() > 0.4f) { SCell.TreeType = ETreeType::Spruce; SCell.TreeSpeciesID = 4; }
+                                    if (ChunkStream.FRand() > 0.4f) { SCell.TreeType = ETreeType::Spruce; SCell.TreeSpeciesID = 4; }
                                     else { SCell.TreeType = ETreeType::Pine; SCell.TreeSpeciesID = 5; }
                                 }
                             }
@@ -496,8 +525,8 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 }
 
                 if (DCell.FireIntensity > 0.0f) {
-                    if (CellStream.FRand() < 0.3f * DeltaDays && DCell.FireIntensity > 0.3f) {
-                        int32 dir = CellStream.RandRange(0, 3);
+                    if (ChunkStream.FRand() < 0.3f * DeltaDays && DCell.FireIntensity > 0.3f) {
+                        int32 dir = ChunkStream.RandRange(0, 3);
                         FCellStaticData* NCellS = nullptr; FCellDynamicData* NCellD = nullptr; FIntPoint NCoord;
                         if (Manager->GetMutableCellGlobal(GlobalX + Offsets[dir][0], GlobalY + Offsets[dir][1], NCellS, NCellD, NCoord)) {
                             if (NCellD->FloraDensity > 0.2f && NCellD->SurfaceWater < 1.0f && NCellD->FireIntensity == 0.0f) NCellD->FireIntensity = DCell.FireIntensity - 0.2f;
@@ -532,7 +561,7 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
 
                 if (SCell.Biome != TargetBiome) {
                     if (TargetBiome == EBiomeType::Swamp) {
-                        if (CellStream.FRand() < 0.1f * DeltaDays) {
+                        if (ChunkStream.FRand() < 0.1f * DeltaDays) {
                             SCell.Biome = TargetBiome;
                             SCell.SoilType = ESoilType::Mud;
                             LocalDirty |= EChunkVisualDirty::Flora | EChunkVisualDirty::TerrainColor;

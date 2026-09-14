@@ -13,6 +13,40 @@ void UClimateSystem::BeginPlay()
     Super::BeginPlay();
 }
 
+// OPTIMALIZACE: Zero-Allocation okolní cache, likviduje desetitisíce volání TMap uvnitø inner loopu
+namespace {
+    struct FClimateNeighborhood {
+        const FChunkData* Chunks[3][3];
+        int32 ChunkDim;
+        int32 CSize;
+
+        void Initialize(ASimWorldManager* Manager, FIntPoint CenterCoord, int32 InChunkSize) {
+            ChunkDim = InChunkSize;
+            CSize = InChunkSize - 1;
+            for (int32 cy = -1; cy <= 1; cy++) {
+                for (int32 cx = -1; cx <= 1; cx++) {
+                    Chunks[cy + 1][cx + 1] = Manager->WorldChunks.Find(FIntPoint(CenterCoord.X + cx, CenterCoord.Y + cy));
+                }
+            }
+        }
+
+        FORCEINLINE const FCellDynamicData* GetDynamic(int32 lx, int32 ly) const {
+            int32 GridX = 1; int32 GridY = 1;
+
+            if (lx < 0) { GridX = 0; lx += CSize; }
+            else if (lx >= CSize) { GridX = 2; lx -= CSize; }
+
+            if (ly < 0) { GridY = 0; ly += CSize; }
+            else if (ly >= CSize) { GridY = 2; ly -= CSize; }
+
+            if (const FChunkData* TargetChunk = Chunks[GridY][GridX]) {
+                return &TargetChunk->DynamicCells[lx + ly * ChunkDim];
+            }
+            return nullptr;
+        }
+    };
+}
+
 void UClimateSystem::ProcessChunkClimate(FChunkData& OutChunk, FVector2D ChunkCoord, const FChunkGenerationParameters& Params)
 {
     float ChunkWorldSize = (Params.ChunkSize - 1) * 50.0f;
@@ -101,10 +135,14 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
 
-        FChunkData& Chunk = WorldChunks[ChunkKeys[idx]];
+        FIntPoint Coord = ChunkKeys[idx];
+        FChunkData& Chunk = WorldChunks[Coord];
         bool bCloudDirty = false;
         bool bTerrainDirty = false;
         bool bFloraDirty = false;
+
+        FClimateNeighborhood Halo;
+        Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
         const int32 GridSegments = 4;
         int32 StepSize = Manager->ChunkSize / GridSegments;
@@ -119,8 +157,8 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
 
         for (int gy = 0; gy < GridNodes; gy++) {
             for (int gx = 0; gx < GridNodes; gx++) {
-                float WorldX = (ChunkKeys[idx].X * (Manager->ChunkSize - 1) * 50.0f) + (gx * StepSize * 50.0f);
-                float WorldY = (ChunkKeys[idx].Y * (Manager->ChunkSize - 1) * 50.0f) + (gy * StepSize * 50.0f);
+                float WorldX = (Coord.X * (Manager->ChunkSize - 1) * 50.0f) + (gx * StepSize * 50.0f);
+                float WorldY = (Coord.Y * (Manager->ChunkSize - 1) * 50.0f) + (gy * StepSize * 50.0f);
 
                 NoiseAmbient[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.005f, WorldY * 0.005f)) * 0.1f;
 
@@ -144,9 +182,6 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
 
                 FCellStaticData& SCell = Chunk.StaticCells[i];
                 FCellDynamicData& DCell = Chunk.DynamicCells[i];
-
-                int32 GlobalX = (ChunkKeys[idx].X * (Manager->ChunkSize - 1)) + X;
-                int32 GlobalY = (ChunkKeys[idx].Y * (Manager->ChunkSize - 1)) + Y;
 
                 float OldCloud = DCell.CloudDensity;
                 float OldRain = DCell.Rainfall;
@@ -273,8 +308,8 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
                 }
 
                 float UpwindAsh = 0.0f;
-                const FCellDynamicData* UpwindCellD = nullptr;
-                if (Manager->GetCellDynamicGlobalPtr(GlobalX + UpX, GlobalY + UpY, UpwindCellD)) {
+                const FCellDynamicData* UpwindCellD = Halo.GetDynamic(X + UpX, Y + UpY);
+                if (UpwindCellD) {
                     UpwindAsh = UpwindCellD->AshDensity;
                 }
 

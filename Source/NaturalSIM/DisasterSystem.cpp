@@ -45,8 +45,10 @@ void UDisasterSystem::ProcessDisasters(ASimWorldManager* Manager, float DeltaDay
 
 void UDisasterSystem::EvaluateFloodRisks(ASimWorldManager* Manager)
 {
+    int32 CSize = Manager->ChunkSize - 1;
+
     for (FSettlementData& City : Manager->SettlementModule->Settlements) {
-        if (City.Population <= 0) continue;
+        if (City.Population <= 0 || City.ClaimedCells.Num() == 0) continue;
 
         bool bHasWarning = false;
         for (const FDisasterWarning& W : ActiveWarnings) {
@@ -60,21 +62,35 @@ void UDisasterSystem::EvaluateFloodRisks(ASimWorldManager* Manager)
         float TotalRain = 0.0f;
         float MaxSurfaceWater = 0.0f;
 
+        // OPTIMALIZACE: Shlukování požadavkù na buòky podle chunku (zamezí opakovanému volání TMap::Find)
+        TMap<FIntPoint, TArray<FIntPoint>> CellsByChunk;
         for (FIntPoint Coord : City.ClaimedCells) {
-            FCellStaticData SCell; FCellDynamicData DCell;
-            if (Manager->GetCellGlobal(Coord.X, Coord.Y, SCell, DCell)) {
-                if (SCell.Elevation > Manager->SeaLevel) {
-                    TotalRain += DCell.Rainfall;
+            FIntPoint CCoord(Coord.X / CSize, Coord.Y / CSize);
+            CellsByChunk.FindOrAdd(CCoord).Add(FIntPoint(Coord.X % CSize, Coord.Y % CSize));
+        }
 
-                    if (DCell.SurfaceWater > SCell.ChannelDepth + SCell.BankHeight) {
-                        float SpillOver = DCell.SurfaceWater - (SCell.ChannelDepth + SCell.BankHeight);
-                        MaxSurfaceWater = FMath::Max(MaxSurfaceWater, SpillOver);
+        for (const auto& Pair : CellsByChunk) {
+            if (const FChunkData* Chunk = Manager->WorldChunks.Find(Pair.Key)) {
+                for (FIntPoint LCoord : Pair.Value) {
+                    int32 Idx = LCoord.X + LCoord.Y * Manager->ChunkSize;
+                    if (Chunk->StaticCells.IsValidIndex(Idx)) {
+                        const FCellStaticData& SCell = Chunk->StaticCells[Idx];
+                        const FCellDynamicData& DCell = Chunk->DynamicCells[Idx];
+
+                        if (SCell.Elevation > Manager->SeaLevel) {
+                            TotalRain += DCell.Rainfall;
+
+                            if (DCell.SurfaceWater > SCell.ChannelDepth + SCell.BankHeight) {
+                                float SpillOver = DCell.SurfaceWater - (SCell.ChannelDepth + SCell.BankHeight);
+                                MaxSurfaceWater = FMath::Max(MaxSurfaceWater, SpillOver);
+                            }
+                        }
                     }
                 }
             }
         }
 
-        float AvgRain = City.ClaimedCells.Num() > 0 ? (TotalRain / City.ClaimedCells.Num()) : 0.0f;
+        float AvgRain = (TotalRain / City.ClaimedCells.Num());
 
         if (AvgRain > 2.5f && MaxSurfaceWater > 0.5f) {
             FDisasterWarning Warning;
@@ -97,48 +113,51 @@ void UDisasterSystem::EvaluateFloodRisks(ASimWorldManager* Manager)
 
 void UDisasterSystem::EvaluateVolcanicRisks(ASimWorldManager* Manager)
 {
-    for (const auto& Pair : Manager->WorldChunks) {
-        const FChunkData& Chunk = Pair.Value;
+    // OPTIMALIZACE: Iterujeme POUZE aktivní chunky (pokud roste MagmaPressure, chunk je garantovanì oznaèen jako aktivní)
+    for (FIntPoint ChunkKey : Manager->ActiveChunkKeys) {
+        if (const FChunkData* ChunkPtr = Manager->WorldChunks.Find(ChunkKey)) {
+            const FChunkData& Chunk = *ChunkPtr;
 
-        if (Chunk.BaseTectonicPressure < 0.1f) continue;
+            if (Chunk.BaseTectonicPressure < 0.1f) continue;
 
-        for (int32 i = 0; i < Chunk.StaticCells.Num(); i++) {
-            const FCellStaticData& SCell = Chunk.StaticCells[i];
-            const FCellDynamicData& DCell = Chunk.DynamicCells[i];
+            for (int32 i = 0; i < Chunk.StaticCells.Num(); i++) {
+                const FCellStaticData& SCell = Chunk.StaticCells[i];
+                const FCellDynamicData& DCell = Chunk.DynamicCells[i];
 
-            if (SCell.bIsVolcano && DCell.EruptionDaysRemaining > 0.0f && DCell.EruptionDaysRemaining < 10.0f) {
+                if (SCell.bIsVolcano && DCell.EruptionDaysRemaining > 0.0f && DCell.EruptionDaysRemaining < 10.0f) {
 
-                int32 GlobalX = (Pair.Key.X * (Manager->ChunkSize - 1)) + (i % Manager->ChunkSize);
-                int32 GlobalY = (Pair.Key.Y * (Manager->ChunkSize - 1)) + (i / Manager->ChunkSize);
-                FVector2D VolcPos(GlobalX * 50.0f, GlobalY * 50.0f);
+                    int32 GlobalX = (ChunkKey.X * (Manager->ChunkSize - 1)) + (i % Manager->ChunkSize);
+                    int32 GlobalY = (ChunkKey.Y * (Manager->ChunkSize - 1)) + (i / Manager->ChunkSize);
+                    FVector2D VolcPos(GlobalX * 50.0f, GlobalY * 50.0f);
 
-                bool bExists = false;
-                for (const FDisasterWarning& W : ActiveWarnings) {
-                    if (W.Type == EDisasterType::VolcanicEruption && FVector2D::Distance(W.Epicenter, VolcPos) < 1000.0f) {
-                        bExists = true;
-                        break;
-                    }
-                }
-
-                if (!bExists) {
-                    FDisasterWarning Warning;
-                    Warning.Type = EDisasterType::VolcanicEruption;
-                    Warning.Epicenter = VolcPos;
-                    Warning.Severity = 10.0f;
-                    Warning.DaysToImpact = DCell.EruptionDaysRemaining;
-                    Warning.Radius = 15000.0f;
-
-                    for (const FSettlementData& City : Manager->SettlementModule->Settlements) {
-                        if (FVector2D::Distance(City.Position, VolcPos) < Warning.Radius) {
-                            Warning.AffectedSettlementIDs.Add(City.SettlementID);
+                    bool bExists = false;
+                    for (const FDisasterWarning& W : ActiveWarnings) {
+                        if (W.Type == EDisasterType::VolcanicEruption && FVector2D::Distance(W.Epicenter, VolcPos) < 1000.0f) {
+                            bExists = true;
+                            break;
                         }
                     }
 
-                    ActiveWarnings.Add(Warning);
+                    if (!bExists) {
+                        FDisasterWarning Warning;
+                        Warning.Type = EDisasterType::VolcanicEruption;
+                        Warning.Epicenter = VolcPos;
+                        Warning.Severity = 10.0f;
+                        Warning.DaysToImpact = DCell.EruptionDaysRemaining;
+                        Warning.Radius = 15000.0f;
 
-                    if (Manager->HistoryModule && Warning.AffectedSettlementIDs.Num() > 0) {
-                        FString Desc = FString::Printf(TEXT("Zeme se trese a z nedaleke hory stoupa dym. Osady v okoli se pripravuji na moznou erupci za %.1f dni."), Warning.DaysToImpact);
-                        Manager->HistoryModule->LogEvent(Manager->CurrentYear, Manager->CurrentDay, TEXT("Eruption Warning"), TEXT("Disaster"), Desc, VolcPos, -1);
+                        for (const FSettlementData& City : Manager->SettlementModule->Settlements) {
+                            if (FVector2D::Distance(City.Position, VolcPos) < Warning.Radius) {
+                                Warning.AffectedSettlementIDs.Add(City.SettlementID);
+                            }
+                        }
+
+                        ActiveWarnings.Add(Warning);
+
+                        if (Manager->HistoryModule && Warning.AffectedSettlementIDs.Num() > 0) {
+                            FString Desc = FString::Printf(TEXT("Zeme se trese a z nedaleke hory stoupa dym. Osady v okoli se pripravuji na moznou erupci za %.1f dni."), Warning.DaysToImpact);
+                            Manager->HistoryModule->LogEvent(Manager->CurrentYear, Manager->CurrentDay, TEXT("Eruption Warning"), TEXT("Disaster"), Desc, VolcPos, -1);
+                        }
                     }
                 }
             }
