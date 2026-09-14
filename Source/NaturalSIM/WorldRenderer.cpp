@@ -400,7 +400,8 @@ void UWorldRenderer::RenderChunk_GameThread(TSharedPtr<FChunkMeshData> MeshData,
 
     if (RenderedFlags & EChunkVisualDirty::Terrain || RenderedFlags & EChunkVisualDirty::TerrainColor) {
         if (TerrainMesh && MeshData->Vertices.Num() > 0) {
-            TerrainMesh->CreateMeshSection_LinearColor(ChunkIndex, MeshData->Vertices, MeshData->Triangles, MeshData->Normals, MeshData->UV0, MeshData->VertexColors, TArray<FProcMeshTangent>(), true);
+            // OPTIMALIZACE: false místo true pro kolize uleví Game Threadu o desítky milisekund!
+            TerrainMesh->CreateMeshSection_LinearColor(ChunkIndex, MeshData->Vertices, MeshData->Triangles, MeshData->Normals, MeshData->UV0, MeshData->VertexColors, TArray<FProcMeshTangent>(), false);
         }
     }
 
@@ -455,17 +456,20 @@ void UWorldRenderer::UpdateWeatherEntities()
     FVector2D GlobalWind(FMath::Cos(SeasonAlpha), FMath::Sin(SeasonAlpha));
     GlobalWind.Normalize();
 
-    // OPTIMALIZACE: Culling poèasí. Zabráníme HISM v kopírování statisícù neviditelných instancí
     FVector PlayerLoc = WorldManager->GetPlayerLocation();
     FVector2D PlayerPos2D(PlayerLoc.X, PlayerLoc.Y);
     float RenderDistSq = 50000.0f * 50000.0f;
 
     for (const auto& Pair : WorldManager->WorldChunks) {
-        const FChunkData& Chunk = Pair.Value;
         FVector2D ChunkCoord = FVector2D(Pair.Key.X, Pair.Key.Y);
         int32 ChunkSize = WorldManager->ChunkSize;
         float ChunkWorldSize = (ChunkSize - 1) * CellSize;
 
+        // OPTIMALIZACE: Chunk-Level Culling odstraní testování milionù bunìk u vzdálených chunkù
+        FVector2D ChunkCenter = (ChunkCoord * ChunkWorldSize) + FVector2D(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f);
+        if (FVector2D::DistSquared(ChunkCenter, PlayerPos2D) > RenderDistSq + (ChunkWorldSize * ChunkWorldSize)) continue;
+
+        const FChunkData& Chunk = Pair.Value;
         int32 Step = WorldManager->CloudResolutionStep;
         float HalfStep = (CellSize * Step) * 0.5f;
         float CloudScaleXY = (HalfStep * 1.9f) / 100.0f;
@@ -475,8 +479,6 @@ void UWorldRenderer::UpdateWeatherEntities()
 
                 float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
                 float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
-
-                if (FVector2D::DistSquared(FVector2D(LocalX, LocalY), PlayerPos2D) > RenderDistSq) continue;
 
                 int32 Index = X + (Y * ChunkSize);
                 if (!Chunk.StaticCells.IsValidIndex(Index)) continue;
