@@ -441,12 +441,12 @@ void UWorldRenderer::UpdateWeatherEntities()
 {
     if (!WorldManager) return;
 
-    TArray<FTransform> CloudTransforms;
-    TArray<FLinearColor> CloudColors;
-    TArray<FTransform> RainTransforms;
-    TArray<FLinearColor> RainColors;
-    TArray<FTransform> FogTransforms;
-    TArray<FLinearColor> FogColors;
+    TArray<FTransform> CloudTransforms;  CloudTransforms.Reserve(10000);
+    TArray<FLinearColor> CloudColors;    CloudColors.Reserve(10000);
+    TArray<FTransform> RainTransforms;   RainTransforms.Reserve(5000);
+    TArray<FLinearColor> RainColors;     RainColors.Reserve(5000);
+    TArray<FTransform> FogTransforms;    FogTransforms.Reserve(5000);
+    TArray<FLinearColor> FogColors;      FogColors.Reserve(5000);
 
     float CellSize = 50.0f;
     float CloudDensityThreshold = WorldManager->CloudDensityThreshold;
@@ -454,6 +454,11 @@ void UWorldRenderer::UpdateWeatherEntities()
     float SeasonAlpha = (WorldManager->CurrentDay / 365.0f) * PI * 2.0f;
     FVector2D GlobalWind(FMath::Cos(SeasonAlpha), FMath::Sin(SeasonAlpha));
     GlobalWind.Normalize();
+
+    // OPTIMALIZACE: Culling poèasí. Zabráníme HISM v kopírování statisícù neviditelných instancí
+    FVector PlayerLoc = WorldManager->GetPlayerLocation();
+    FVector2D PlayerPos2D(PlayerLoc.X, PlayerLoc.Y);
+    float RenderDistSq = 50000.0f * 50000.0f;
 
     for (const auto& Pair : WorldManager->WorldChunks) {
         const FChunkData& Chunk = Pair.Value;
@@ -467,14 +472,18 @@ void UWorldRenderer::UpdateWeatherEntities()
 
         for (int32 Y = 0; Y < ChunkSize - 1; Y += Step) {
             for (int32 X = 0; X < ChunkSize - 1; X += Step) {
+
+                float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
+                float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
+
+                if (FVector2D::DistSquared(FVector2D(LocalX, LocalY), PlayerPos2D) > RenderDistSq) continue;
+
                 int32 Index = X + (Y * ChunkSize);
                 if (!Chunk.StaticCells.IsValidIndex(Index)) continue;
 
                 const FCellStaticData& SCell = Chunk.StaticCells[Index];
                 const FCellDynamicData& DCell = Chunk.DynamicCells[Index];
 
-                float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
-                float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
                 float VisualCloudDensity = DCell.CloudDensity;
                 float VisualRainfall = DCell.Rainfall;
                 bool bHasAsh = DCell.AshDensity > 0.05f;
@@ -771,12 +780,18 @@ void UWorldRenderer::UpdateFastEntities()
         HISM->MarkRenderStateDirty();
         };
 
+    FVector PlayerLoc = WorldManager->GetPlayerLocation();
+    FVector2D PlayerPos2D(PlayerLoc.X, PlayerLoc.Y);
+    float RenderDistSq = 80000.0f * 80000.0f;
+
     if (WorldManager->bFaunaVisualDirty && FaunaHISM && WorldManager->FaunaModule) {
-        TArray<FTransform> Transforms;
-        TArray<FLinearColor> Colors;
+        TArray<FTransform> Transforms; Transforms.Reserve(500);
+        TArray<FLinearColor> Colors; Colors.Reserve(500);
 
         for (const FAnimalData& Animal : WorldManager->FaunaModule->Animals) {
             if (Animal.HerdSize <= 0.0f) continue;
+            if (FVector2D::DistSquared(Animal.Position, PlayerPos2D) > RenderDistSq) continue;
+
             FCellStaticData SCell; FCellDynamicData DCell;
             int32 GX = FMath::FloorToInt(Animal.Position.X / 50.0f);
             int32 GY = FMath::FloorToInt(Animal.Position.Y / 50.0f);
@@ -797,11 +812,13 @@ void UWorldRenderer::UpdateFastEntities()
     }
 
     if (WorldManager->bHumanVisualDirty && HumanHISM && WorldManager->HumanModule) {
-        TArray<FTransform> Transforms;
-        TArray<FLinearColor> Colors;
+        TArray<FTransform> Transforms; Transforms.Reserve(500);
+        TArray<FLinearColor> Colors; Colors.Reserve(500);
 
         for (const FTribeData& Tribe : WorldManager->HumanModule->Tribes) {
             if (Tribe.Population <= 0) continue;
+            if (FVector2D::DistSquared(Tribe.Position, PlayerPos2D) > RenderDistSq) continue;
+
             FCellStaticData SCell; FCellDynamicData DCell;
             int32 GX = FMath::FloorToInt(Tribe.Position.X / 50.0f);
             int32 GY = FMath::FloorToInt(Tribe.Position.Y / 50.0f);
@@ -825,8 +842,10 @@ void UWorldRenderer::UpdateSettlementEntities()
 {
     if (!WorldManager || !SettlementHISM || !WorldManager->SettlementModule) return;
 
-    TArray<FTransform> Transforms;
-    TArray<FLinearColor> Colors;
+    TArray<FTransform> Transforms; Transforms.Reserve(5000);
+    TArray<FLinearColor> Colors; Colors.Reserve(5000);
+
+    float GoldenAngle = 137.507764f * (PI / 180.0f);
 
     for (const FSettlementData& City : WorldManager->SettlementModule->Settlements) {
         if (City.Population <= 0) continue;
@@ -836,46 +855,28 @@ void UWorldRenderer::UpdateSettlementEntities()
         int32 PopPerHouse = 50;
         int32 MaxHouses = FMath::Clamp(FMath::FloorToInt((float)City.Population / PopPerHouse), 1, 150);
 
-        TArray<FVector2D> BuiltHouses;
-        BuiltHouses.Reserve(MaxHouses);
-
-        float HouseRadius = 10.0f;
-        float MaxDist = FMath::Max(20.0f, FMath::Sqrt((float)MaxHouses) * 18.0f);
-
+        // OPTIMALIZACE: Vogel's Golden Spiral. Zcela odstraòuje O(N^2) kolizní check v cyklu.
         for (int h = 0; h < MaxHouses; h++) {
-            for (int attempt = 0; attempt < 25; attempt++) {
-                float Angle = BldStream.FRandRange(0.0f, PI * 2.0f);
-                float Dist = BldStream.FRandRange(0.0f, 1.0f) * BldStream.FRandRange(0.0f, 1.0f) * MaxDist;
-                FVector2D HPos = City.Position + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Dist;
+            float r = 14.0f * FMath::Sqrt((float)h);
+            float theta = h * GoldenAngle;
+            FVector2D HPos = City.Position + FVector2D(FMath::Cos(theta), FMath::Sin(theta)) * r;
 
-                bool bOverlap = false;
-                for (const FVector2D& Built : BuiltHouses) {
-                    if (FVector2D::DistSquared(HPos, Built) < HouseRadius * HouseRadius) {
-                        bOverlap = true; break;
-                    }
-                }
-                if (bOverlap) continue;
+            int32 GlobalX = FMath::FloorToInt(HPos.X / 50.0f);
+            int32 GlobalY = FMath::FloorToInt(HPos.Y / 50.0f);
 
-                int32 GlobalX = FMath::FloorToInt(HPos.X / 50.0f);
-                int32 GlobalY = FMath::FloorToInt(HPos.Y / 50.0f);
+            FCellStaticData SCell; FCellDynamicData DCell;
+            if (!WorldManager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) continue;
+            if (DCell.SurfaceWater >= 1.0f || SCell.Elevation <= WorldManager->SeaLevel || SCell.Elevation > WorldManager->SeaLevel + 800.0f) continue;
+            if (DCell.GlacierIce > 0.5f) continue;
 
-                FCellStaticData SCell; FCellDynamicData DCell;
-                if (!WorldManager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) continue;
-                if (DCell.SurfaceWater >= 1.0f || SCell.Elevation <= WorldManager->SeaLevel || SCell.Elevation > WorldManager->SeaLevel + 800.0f) continue;
-                if (DCell.GlacierIce > 0.5f) continue;
+            FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
+            float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
+            FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
 
-                BuiltHouses.Add(HPos);
+            float RandomScale = BldStream.FRandRange(0.15f, 0.25f);
 
-                FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
-                float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
-                FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
-
-                float RandomScale = BldStream.FRandRange(0.15f, 0.25f);
-
-                Transforms.Add(FTransform(Rot, Loc, FVector(RandomScale)));
-                Colors.Add(City.Color);
-                break;
-            }
+            Transforms.Add(FTransform(Rot, Loc, FVector(RandomScale)));
+            Colors.Add(City.Color);
         }
 
         for (FIntPoint Coord : City.ClaimedCells) {
