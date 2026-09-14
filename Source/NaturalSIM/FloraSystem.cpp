@@ -265,7 +265,14 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
     ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
-        FChunkData& Chunk = WorldChunks[ChunkKeys[idx]];
+
+        FIntPoint Coord = ChunkKeys[idx];
+
+        // FIX CRASH: Bezpeèné ètení z mapy
+        FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+        if (!ChunkPtr) return;
+        FChunkData& Chunk = *ChunkPtr;
+
         uint8 LocalDirty = 0;
 
         float LocalBirths = 0.0f;
@@ -273,9 +280,9 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
         int32 Offsets[4][2] = { {0,1}, {1,0}, {0,-1}, {-1,0} };
 
         FFloraNeighborhood Halo;
-        Halo.Initialize(Manager, ChunkKeys[idx], Manager->ChunkSize);
+        Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
-        uint32 ChunkHashSeed = Manager->MapSeed + (ChunkKeys[idx].X * 374761393U) + (ChunkKeys[idx].Y * 668265263U) + Manager->CurrentDay;
+        uint32 ChunkHashSeed = Manager->MapSeed + (Coord.X * 374761393U) + (Coord.Y * 668265263U) + Manager->CurrentDay;
         ChunkHashSeed = (ChunkHashSeed ^ (ChunkHashSeed >> 13)) * 1274126177U;
         FRandomStream ChunkStream(ChunkHashSeed);
 
@@ -292,8 +299,8 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
 
         for (int gy = 0; gy < GridNodes; gy++) {
             for (int gx = 0; gx < GridNodes; gx++) {
-                int32 WorldX = (ChunkKeys[idx].X * (Manager->ChunkSize - 1)) + (gx * StepSize);
-                int32 WorldY = (ChunkKeys[idx].Y * (Manager->ChunkSize - 1)) + (gy * StepSize);
+                int32 WorldX = (Coord.X * (Manager->ChunkSize - 1)) + (gx * StepSize);
+                int32 WorldY = (Coord.Y * (Manager->ChunkSize - 1)) + (gy * StepSize);
 
                 GridMix[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.015f, WorldY * 0.015f)) * 300.0f;
                 GridMeadow[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.025f, WorldY * 0.025f));
@@ -311,7 +318,7 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
 
                 FCellStaticData& SCell = Chunk.StaticCells[i];
                 FCellDynamicData& DCell = Chunk.DynamicCells[i];
-                int32 GlobalX = (ChunkKeys[idx].X * CSize) + X; int32 GlobalY = (ChunkKeys[idx].Y * CSize) + Y;
+                int32 GlobalX = (Coord.X * CSize) + X; int32 GlobalY = (Coord.Y * CSize) + Y;
 
                 int32 gx = FMath::Min(X / StepSize, GridSegments - 1);
                 int32 gy = FMath::Min(Y / StepSize, GridSegments - 1);
@@ -325,7 +332,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
 
                 DCell.FireIntensityBuffer = DCell.FireIntensity;
 
-                // OPTIMALIZACE 2: Bezpeèné stahování ohnì od sousedù (Pull-Logic), odstranìní nebezpeèného TMap::Find
                 if (DCell.FireIntensity == 0.0f && DCell.FloraDensity > 0.2f && DCell.SurfaceWater < 1.0f) {
                     for (int32 dir = 0; dir < 4; dir++) {
                         const FCellStaticData* NCellS = nullptr; const FCellDynamicData* NCellD = nullptr;
@@ -397,7 +403,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                     continue;
                 }
 
-                // OPTIMALIZACE 3: Slouèení dvou 4x sousedských for-cyklù do jednoho (polovièní zátìž cache)
                 float LocalSlope = 0.0f;
                 float NeighborSeeds = 0.0f, NeighborShrubs = 0.0f;
 
@@ -679,16 +684,16 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
         }
 
         for (int32 step = 0; step < Manager->ChunkSize; step++) {
-            int32 GlobalRightX = (ChunkKeys[idx].X * CSize) + CSize;
-            int32 GlobalRightY = (ChunkKeys[idx].Y * CSize) + step;
+            int32 GlobalRightX = (Coord.X * CSize) + CSize;
+            int32 GlobalRightY = (Coord.Y * CSize) + step;
             const FCellStaticData* RealRightS = nullptr; const FCellDynamicData* RealRightD = nullptr;
             if (Manager->GetCellStaticGlobalPtr(GlobalRightX, GlobalRightY, RealRightS) && Manager->GetCellDynamicGlobalPtr(GlobalRightX, GlobalRightY, RealRightD)) {
                 Chunk.StaticCells[CSize + step * Manager->ChunkSize] = *RealRightS;
                 Chunk.DynamicCells[CSize + step * Manager->ChunkSize] = *RealRightD;
             }
 
-            int32 GlobalBotX = (ChunkKeys[idx].X * CSize) + step;
-            int32 GlobalBotY = (ChunkKeys[idx].Y * CSize) + CSize;
+            int32 GlobalBotX = (Coord.X * CSize) + step;
+            int32 GlobalBotY = (Coord.Y * CSize) + CSize;
             const FCellStaticData* RealBotS = nullptr; const FCellDynamicData* RealBotD = nullptr;
             if (Manager->GetCellStaticGlobalPtr(GlobalBotX, GlobalBotY, RealBotS) && Manager->GetCellDynamicGlobalPtr(GlobalBotX, GlobalBotY, RealBotD)) {
                 Chunk.StaticCells[step + CSize * Manager->ChunkSize] = *RealBotS;
@@ -696,8 +701,8 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
             }
         }
         const FCellStaticData* RealCornerS = nullptr; const FCellDynamicData* RealCornerD = nullptr;
-        if (Manager->GetCellStaticGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerS) &&
-            Manager->GetCellDynamicGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerD)) {
+        if (Manager->GetCellStaticGlobalPtr((Coord.X * CSize) + CSize, (Coord.Y * CSize) + CSize, RealCornerS) &&
+            Manager->GetCellDynamicGlobalPtr((Coord.X * CSize) + CSize, (Coord.Y * CSize) + CSize, RealCornerD)) {
             Chunk.StaticCells[CSize + CSize * Manager->ChunkSize] = *RealCornerS;
             Chunk.DynamicCells[CSize + CSize * Manager->ChunkSize] = *RealCornerD;
         }

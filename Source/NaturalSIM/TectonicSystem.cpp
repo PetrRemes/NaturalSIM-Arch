@@ -24,7 +24,6 @@ struct FChunkNeighborhood {
     }
 
     FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
-        // FAST-PATH: Zamezení branchingu pro 96 % bunìk uvnitø chunku
         if (lx >= 0 && lx < CS && ly >= 0 && ly < CS) {
             int32 Idx = lx + ly * CS;
             OutS = &Chunks[1][1]->StaticCells[Idx];
@@ -83,7 +82,13 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
     int32 Offsets[8][2] = { {0,1}, {1,0}, {0,-1}, {-1,0}, {1,1}, {-1,-1}, {1,-1}, {-1,1} };
 
     ParallelFor(ChunkKeys.Num(), [&](int32 idx) {
-        FChunkData& Chunk = WorldChunks[ChunkKeys[idx]];
+        FIntPoint Coord = ChunkKeys[idx];
+
+        // FIX CRASH: Bezpeèné ètení z mapy
+        FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+        if (!ChunkPtr) return;
+        FChunkData& Chunk = *ChunkPtr;
+
         bool bTerrainDirty = false;
         bool bCloudDirty = false;
 
@@ -96,13 +101,13 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             float Intensity = 0.5f + (Overstress * 0.05f) + FMath::FRandRange(0.0f, 0.8f);
 
             FScopeLock Lock(&EarthquakeMutex);
-            PendingEarthquakes.Add(TPair<FIntPoint, float>(ChunkKeys[idx], Intensity));
+            PendingEarthquakes.Add(TPair<FIntPoint, float>(Coord, Intensity));
 
             Chunk.FaultStress *= FMath::FRandRange(0.1f, 0.2f);
         }
 
         FChunkNeighborhood Halo;
-        Halo.Initialize(Manager, ChunkKeys[idx], Manager->ChunkSize);
+        Halo.Initialize(Manager, Coord, Manager->ChunkSize);
 
         auto GetLowestNeighbor = [&](int32 cx, int32 cy, int32 lx, int32 ly) -> FIntPoint {
             const FCellStaticData* cCellS = nullptr; const FCellDynamicData* cCellD = nullptr;
@@ -133,8 +138,8 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
 
                 FCellStaticData& SCell = Chunk.StaticCells[i];
                 FCellDynamicData& DCell = Chunk.DynamicCells[i];
-                int32 GlobalX = (ChunkKeys[idx].X * CSize) + X;
-                int32 GlobalY = (ChunkKeys[idx].Y * CSize) + Y;
+                int32 GlobalX = (Coord.X * CSize) + X;
+                int32 GlobalY = (Coord.Y * CSize) + Y;
 
                 if (SCell.bIsVolcano) {
                     DCell.MagmaPressure += (TidalMultiplier * Manager->VolcanicActivity * 3.0f * DeltaDays);
@@ -253,16 +258,16 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
         }
 
         for (int32 step = 0; step < Manager->ChunkSize; step++) {
-            int32 GlobalRightX = (ChunkKeys[idx].X * CSize) + CSize;
-            int32 GlobalRightY = (ChunkKeys[idx].Y * CSize) + step;
+            int32 GlobalRightX = (Coord.X * CSize) + CSize;
+            int32 GlobalRightY = (Coord.Y * CSize) + step;
             const FCellStaticData* RealRightS = nullptr; const FCellDynamicData* RealRightD = nullptr;
             if (Manager->GetCellStaticGlobalPtr(GlobalRightX, GlobalRightY, RealRightS) && Manager->GetCellDynamicGlobalPtr(GlobalRightX, GlobalRightY, RealRightD)) {
                 Chunk.StaticCells[CSize + step * Manager->ChunkSize] = *RealRightS;
                 Chunk.DynamicCells[CSize + step * Manager->ChunkSize] = *RealRightD;
             }
 
-            int32 GlobalBotX = (ChunkKeys[idx].X * CSize) + step;
-            int32 GlobalBotY = (ChunkKeys[idx].Y * CSize) + CSize;
+            int32 GlobalBotX = (Coord.X * CSize) + step;
+            int32 GlobalBotY = (Coord.Y * CSize) + CSize;
             const FCellStaticData* RealBotS = nullptr; const FCellDynamicData* RealBotD = nullptr;
             if (Manager->GetCellStaticGlobalPtr(GlobalBotX, GlobalBotY, RealBotS) && Manager->GetCellDynamicGlobalPtr(GlobalBotX, GlobalBotY, RealBotD)) {
                 Chunk.StaticCells[step + CSize * Manager->ChunkSize] = *RealBotS;
@@ -270,8 +275,8 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
             }
         }
         const FCellStaticData* RealCornerS = nullptr; const FCellDynamicData* RealCornerD = nullptr;
-        if (Manager->GetCellStaticGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerS) &&
-            Manager->GetCellDynamicGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerD)) {
+        if (Manager->GetCellStaticGlobalPtr((Coord.X * CSize) + CSize, (Coord.Y * CSize) + CSize, RealCornerS) &&
+            Manager->GetCellDynamicGlobalPtr((Coord.X * CSize) + CSize, (Coord.Y * CSize) + CSize, RealCornerD)) {
             Chunk.StaticCells[CSize + CSize * Manager->ChunkSize] = *RealCornerS;
             Chunk.DynamicCells[CSize + CSize * Manager->ChunkSize] = *RealCornerD;
         }
@@ -285,9 +290,11 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
         });
 
     for (int32 idx = 0; idx < ChunkKeys.Num(); idx++) {
-        FChunkData& Chunk = WorldChunks[ChunkKeys[idx]];
-        for (int i = 0; i < Chunk.DynamicCells.Num(); i++) {
-            Chunk.DynamicCells[i].Lava = Chunk.DynamicCells[i].LavaBuffer;
+        FChunkData* ChunkPtr = WorldChunks.Find(ChunkKeys[idx]);
+        if (ChunkPtr) {
+            for (int i = 0; i < ChunkPtr->DynamicCells.Num(); i++) {
+                ChunkPtr->DynamicCells[i].Lava = ChunkPtr->DynamicCells[i].LavaBuffer;
+            }
         }
         if (SafeFlags[idx] != 0) {
             Manager->RegisterVisualChange(ChunkKeys[idx], SafeFlags[idx]);

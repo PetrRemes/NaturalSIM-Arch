@@ -29,7 +29,6 @@ struct FClimateNeighborhood {
     }
 
     FORCEINLINE const FCellDynamicData* GetDynamic(int32 lx, int32 ly) const {
-        // OPTIMALIZACE: Rychlý pøístup pro 96 % bunìk uvnitø vlastního chunku
         if (lx >= 0 && lx < CSize && ly >= 0 && ly < CSize) {
             return &Chunks[1][1]->DynamicCells[lx + ly * ChunkDim];
         }
@@ -138,7 +137,12 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
         if (!ChunkKeys.IsValidIndex(idx)) return;
 
         FIntPoint Coord = ChunkKeys[idx];
-        FChunkData& Chunk = WorldChunks[Coord];
+
+        // FIX CRASH: Bezpeèné ètení z mapy
+        FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+        if (!ChunkPtr) return;
+        FChunkData& Chunk = *ChunkPtr;
+
         bool bCloudDirty = false;
         bool bTerrainDirty = false;
         bool bFloraDirty = false;
@@ -350,7 +354,11 @@ void UClimateSystem::UpdateDailyClimate(const TArray<FIntPoint>& ChunkKeys, TMap
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
 
-        FChunkData& Chunk = WorldChunks[ChunkKeys[idx]];
+        FIntPoint Coord = ChunkKeys[idx];
+        FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+        if (!ChunkPtr) return;
+        FChunkData& Chunk = *ChunkPtr;
+
         bool bAshDirty = false;
 
         for (int i = 0; i < Chunk.DynamicCells.Num(); i++) {
