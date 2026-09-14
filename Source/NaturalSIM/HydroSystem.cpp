@@ -22,6 +22,13 @@ struct FHydroNeighborhood {
     }
 
     FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
+        if (lx >= 0 && lx < CS && ly >= 0 && ly < CS) {
+            int32 Idx = lx + ly * CS;
+            OutS = &Chunks[1][1]->StaticCells[Idx];
+            OutD = &Chunks[1][1]->DynamicCells[Idx];
+            return;
+        }
+
         int32 GridX = 1; int32 GridY = 1;
         int32 LocalX = lx; int32 LocalY = ly;
 

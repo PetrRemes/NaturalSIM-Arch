@@ -20,6 +20,14 @@ struct FFloraNeighborhood {
     }
 
     FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
+        // FAST-PATH: Zamezení branchingu pro 96 % bunìk uvnitø chunku
+        if (lx >= 0 && lx < CS && ly >= 0 && ly < CS) {
+            int32 Idx = lx + ly * CS;
+            OutS = &Chunks[1][1]->StaticCells[Idx];
+            OutD = &Chunks[1][1]->DynamicCells[Idx];
+            return;
+        }
+
         int32 GridX = 1; int32 GridY = 1;
         int32 LocalX = lx; int32 LocalY = ly;
 
@@ -249,6 +257,12 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
     TArray<uint8> SafeFlags;
     SafeFlags.Init(0, EndIdx - StartIdx);
 
+    auto BiLerp = [](float v00, float v10, float v01, float v11, float tx, float ty) {
+        float top = FMath::Lerp(v00, v10, tx);
+        float bot = FMath::Lerp(v01, v11, tx);
+        return FMath::Lerp(top, bot, ty);
+        };
+
     ParallelFor(EndIdx - StartIdx, [&](int32 iter) {
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
@@ -266,6 +280,33 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
         ChunkHashSeed = (ChunkHashSeed ^ (ChunkHashSeed >> 13)) * 1274126177U;
         FRandomStream ChunkStream(ChunkHashSeed);
 
+        const int32 GridSegments = 4;
+        int32 StepSize = Manager->ChunkSize / GridSegments;
+        if (StepSize < 1) StepSize = 1;
+        int32 GridNodes = GridSegments + 1;
+
+        float GridMix[5][5];
+        float GridMeadow[5][5];
+        float GridBush[5][5];
+        float GridSnow[5][5];
+        // OPTIMALIZACE: Grid pro ForestSuitability, odstraòuje 10 000 volání PerlinNoise2D z hot-loopu
+        float GridForest[5][5];
+
+        for (int gy = 0; gy < GridNodes; gy++) {
+            for (int gx = 0; gx < GridNodes; gx++) {
+                int32 WorldX = (ChunkKeys[idx].X * (Manager->ChunkSize - 1)) + (gx * StepSize);
+                int32 WorldY = (ChunkKeys[idx].Y * (Manager->ChunkSize - 1)) + (gy * StepSize);
+
+                GridMix[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.015f, WorldY * 0.015f)) * 300.0f;
+                GridMeadow[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.025f, WorldY * 0.025f));
+                GridBush[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.08f, WorldY * 0.08f));
+                GridForest[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.02f, WorldY * 0.02f)) * 0.3f;
+                if (bRunColorUpdate) {
+                    GridSnow[gy][gx] = FMath::PerlinNoise2D(FVector2D(WorldX * 0.1f, WorldY * 0.1f)) * 0.15f;
+                }
+            }
+        }
+
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
                 int32 i = X + Y * Manager->ChunkSize;
@@ -278,6 +319,11 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                     Halo.GetNeighbor(X + dx, Y + dy, OutS, OutD);
                     };
 
+                int32 gx = FMath::Min(X / StepSize, GridSegments - 1);
+                int32 gy = FMath::Min(Y / StepSize, GridSegments - 1);
+                float tx = (float)(X - (gx * StepSize)) / StepSize;
+                float ty = (float)(Y - (gy * StepSize)) / StepSize;
+
                 ETreeType OldTree = SCell.TreeType;
                 float OldFlora = DCell.FloraDensity;
                 float OldWood = DCell.WoodAmount;
@@ -286,7 +332,7 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 DCell.FireIntensityBuffer = DCell.FireIntensity;
 
                 float Toxicity = FMath::Clamp((DCell.WaterPollution * 1.5f) + (DCell.AshDensityBuffer * 0.25f), 0.0f, 1.0f);
-                float MixNoise = FMath::PerlinNoise2D(FVector2D(GlobalX * 0.015f, GlobalY * 0.015f)) * 300.0f;
+                float MixNoise = BiLerp(GridMix[gy][gx], GridMix[gy][gx + 1], GridMix[gy + 1][gx], GridMix[gy + 1][gx + 1], tx, ty);
                 float EffAlt = FMath::Max(0.0f, Altitude + MixNoise);
 
                 float WaterAvailability = (DCell.GroundWater / 100.0f) * 0.6f + (DCell.Rainfall * 0.4f);
@@ -366,8 +412,11 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 else if (Altitude < 1200.0f) OrographicBonus = 0.5f;
                 else OrographicBonus = -1.0f * ((Altitude - 1200.0f) / 400.0f);
 
-                float ForestSuitability = WaterAvailability + SoilQuality - LocalSlope + (FMath::PerlinNoise2D(FVector2D(GlobalX * 0.02f, GlobalY * 0.02f)) * 0.3f) + OrographicBonus;
-                float MeadowNoise = FMath::PerlinNoise2D(FVector2D(GlobalX * 0.025f, GlobalY * 0.025f));
+                // OPTIMALIZACE: Aplikace bilerp šumu i pro ForestSuitability
+                float ForestNoise = BiLerp(GridForest[gy][gx], GridForest[gy][gx + 1], GridForest[gy + 1][gx], GridForest[gy + 1][gx + 1], tx, ty);
+                float ForestSuitability = WaterAvailability + SoilQuality - LocalSlope + ForestNoise + OrographicBonus;
+
+                float MeadowNoise = BiLerp(GridMeadow[gy][gx], GridMeadow[gy][gx + 1], GridMeadow[gy + 1][gx], GridMeadow[gy + 1][gx + 1], tx, ty);
                 bool bIsMeadow = MeadowNoise > 0.2f;
 
                 if (DCell.GrazingPressure > 0.5f) {
@@ -409,7 +458,7 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                     DCell.GrassDensity = FMath::Clamp(DCell.GrassDensity + GrowthSpeed * 5.0f, 0.0f, GrassCap);
 
                     if (!bIsSwampy) {
-                        float BushNoise = FMath::PerlinNoise2D(FVector2D(GlobalX * 0.08f, GlobalY * 0.08f));
+                        float BushNoise = BiLerp(GridBush[gy][gx], GridBush[gy][gx + 1], GridBush[gy + 1][gx], GridBush[gy + 1][gx + 1], tx, ty);
                         if (BushNoise > 0.4f && DCell.ForestDensity < 0.5f) {
                             DCell.ShrubDensity = FMath::Min(0.8f, DCell.ShrubDensity + GrowthSpeed);
                             if (DCell.BerryBushes < 20.0f) DCell.BerryBushes += GrowthSpeed * 50.0f;
@@ -585,7 +634,9 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                     if (DCell.SnowAmount > 0.05f || DCell.Temperature <= 0.0f) {
                         float FreezeAlpha = (DCell.Temperature <= 0.0f) ? FMath::Clamp(-DCell.Temperature / 15.0f, 0.0f, 1.0f) : 0.0f;
                         float SnowAlpha = FMath::Clamp((DCell.SnowAmount / 2.0f) + FreezeAlpha, 0.0f, 0.85f);
-                        float SnowShade = 0.85f + (FMath::PerlinNoise2D(FVector2D(GlobalX * 0.1f, GlobalY * 0.1f)) * 0.15f);
+
+                        float SnowShade = 0.85f + BiLerp(GridSnow[gy][gx], GridSnow[gy][gx + 1], GridSnow[gy + 1][gx], GridSnow[gy + 1][gx + 1], tx, ty);
+
                         FLinearColor SnowColor(0.95f * SnowShade, 0.98f * SnowShade, 1.0f * SnowShade, 1.0f);
                         TargetColor = FMath::Lerp(TargetColor, SnowColor, SnowAlpha);
                     }

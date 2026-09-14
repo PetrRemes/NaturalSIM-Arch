@@ -10,7 +10,6 @@
 UTectonicSystem::UTectonicSystem() { PrimaryComponentTick.bCanEverTick = false; }
 void UTectonicSystem::BeginPlay() { Super::BeginPlay(); }
 
-// OPTIMALIZACE 6: Zero-Allocation Neighborhood (Zabránìní zahlcení pamìti v Tectonics)
 struct FChunkNeighborhood {
     const FChunkData* Chunks[3][3];
     int32 CS;
@@ -25,6 +24,14 @@ struct FChunkNeighborhood {
     }
 
     FORCEINLINE void GetNeighbor(int32 lx, int32 ly, const FCellStaticData*& OutS, const FCellDynamicData*& OutD) const {
+        // FAST-PATH: Zamezení branchingu pro 96 % bunìk uvnitø chunku
+        if (lx >= 0 && lx < CS && ly >= 0 && ly < CS) {
+            int32 Idx = lx + ly * CS;
+            OutS = &Chunks[1][1]->StaticCells[Idx];
+            OutD = &Chunks[1][1]->DynamicCells[Idx];
+            return;
+        }
+
         int32 GridX = 1; int32 GridY = 1;
         int32 LocalX = lx; int32 LocalY = ly;
 
@@ -161,7 +168,6 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                 float MyLavaDelta = 0.0f;
                 float MyHead = SCell.Elevation + DCell.Lava;
 
-                // OPTIMALIZACE: Provádíme pøesun lávy pouze pokud buòka nìjakou obsahuje
                 if (DCell.Lava > 0.001f) {
                     FIntPoint TargetFlow = GetLowestNeighbor(GlobalX, GlobalY, X, Y);
 
@@ -183,7 +189,6 @@ void UTectonicSystem::ProcessDailyTectonics(const TArray<FIntPoint>& ChunkKeys, 
                     }
                 }
 
-                // OPTIMALIZACE: Kontrolujeme pøíliv pouze od sousedù, kteøí reálnì lávu mají
                 for (int32 n = 0; n < 8; n++) {
                     int32 nx = GlobalX + Offsets[n][0];
                     int32 ny = GlobalY + Offsets[n][1];
