@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
 #include "SimWorldTypes.h"
+#include "BuildingStyleData.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "WorldRenderer.generated.h"
@@ -37,6 +38,16 @@ public:
     UPROPERTY(VisibleAnywhere, Category = "Rendering") UHierarchicalInstancedStaticMeshComponent* RainHISM;
     UPROPERTY(VisibleAnywhere, Category = "Rendering") UHierarchicalInstancedStaticMeshComponent* FogHISM;
     UPROPERTY(VisibleAnywhere, Category = "Rendering") UHierarchicalInstancedStaticMeshComponent* DisasterHISM;
+
+    // --- NOVA ARCHITEKTURA ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Architecture")
+    TArray<UBuildingStyleData*> AvailableBuildingStyles;
+
+    UPROPERTY()
+    TMap<class UStaticMesh*, UHierarchicalInstancedStaticMeshComponent*> DynamicMeshInstancers;
+
+    UHierarchicalInstancedStaticMeshComponent* GetOrAddInstancer(UStaticMesh* Mesh);
+    // -------------------------
 
     static FLinearColor GetHeatmapColor(const FCellStaticData& SCell, const FCellDynamicData& DCell, EWorldViewMode ViewMode);
 

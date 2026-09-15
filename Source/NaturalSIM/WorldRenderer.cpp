@@ -14,7 +14,6 @@ UWorldRenderer::UWorldRenderer()
 
     TerrainMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("TerrainMesh"));
     TerrainMesh->SetupAttachment(this);
-    // FIX: Vypnutí kolizí a raytracingu chrání pamì pøed obøími memory leaky
     TerrainMesh->bUseAsyncCooking = false;
     TerrainMesh->bVisibleInRayTracing = false;
 
@@ -74,6 +73,27 @@ void UWorldRenderer::BeginPlay() {
 
 void UWorldRenderer::InitializeRenderer(ASimWorldManager* InManager) { WorldManager = InManager; }
 
+UHierarchicalInstancedStaticMeshComponent* UWorldRenderer::GetOrAddInstancer(UStaticMesh* Mesh)
+{
+    if (!Mesh) return nullptr;
+
+    if (UHierarchicalInstancedStaticMeshComponent** Found = DynamicMeshInstancers.Find(Mesh)) {
+        return *Found;
+    }
+
+    UHierarchicalInstancedStaticMeshComponent* NewHISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
+    NewHISM->SetStaticMesh(Mesh);
+    NewHISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    NewHISM->bVisibleInRayTracing = false;
+    NewHISM->SetCastShadow(true);
+    NewHISM->NumCustomDataFloats = 3;
+    NewHISM->RegisterComponent();
+    NewHISM->AttachToComponent(this, FAttachmentTransformRules::KeepRelativeTransform);
+
+    DynamicMeshInstancers.Add(Mesh, NewHISM);
+    return NewHISM;
+}
+
 void UWorldRenderer::ClearAllMeshes() {
     if (TerrainMesh) TerrainMesh->ClearAllMeshSections();
     if (WaterMesh) WaterMesh->ClearAllMeshSections();
@@ -91,6 +111,10 @@ void UWorldRenderer::ClearAllMeshes() {
     if (RainHISM) RainHISM->ClearInstances();
     if (FogHISM) FogHISM->ClearInstances();
     if (DisasterHISM) DisasterHISM->ClearInstances();
+
+    for (auto& Pair : DynamicMeshInstancers) {
+        if (Pair.Value) Pair.Value->ClearInstances();
+    }
 }
 
 FLinearColor UWorldRenderer::GetHeatmapColor(const FCellStaticData& SCell, const FCellDynamicData& DCell, EWorldViewMode ViewMode)
@@ -842,15 +866,30 @@ void UWorldRenderer::UpdateFastEntities()
 
 void UWorldRenderer::UpdateSettlementEntities()
 {
-    if (!WorldManager || !SettlementHISM || !WorldManager->SettlementModule) return;
+    if (!WorldManager || !WorldManager->SettlementModule) return;
 
-    TArray<FTransform> Transforms; Transforms.Reserve(5000);
-    TArray<FLinearColor> Colors; Colors.Reserve(5000);
+    TMap<UStaticMesh*, TArray<FTransform>> MeshBatches;
+    TMap<UStaticMesh*, TArray<FLinearColor>> ColorBatches;
+
+    TArray<FTransform> OldTransforms; OldTransforms.Reserve(5000);
+    TArray<FLinearColor> OldColors; OldColors.Reserve(5000);
 
     float GoldenAngle = 137.507764f * (PI / 180.0f);
 
     for (const FSettlementData& City : WorldManager->SettlementModule->Settlements) {
         if (City.Population <= 0) continue;
+
+        UBuildingStyleData* ActiveStyle = nullptr;
+        for (UBuildingStyleData* Style : AvailableBuildingStyles) {
+            if (!Style) continue;
+            bool bHasMasonry = City.Knowledge.Levels.Contains(EKnowledgeField::Masonry) && City.Knowledge.Levels[EKnowledgeField::Masonry] >= 5.0f;
+            bool bHasIndustry = City.Knowledge.UnlockedTechnologies.Contains("Industrial Mass Production");
+
+            if (Style->bRequiresIndustrial && !bHasIndustry) continue;
+            if (Style->bRequiresMasonry && !bHasMasonry) continue;
+
+            ActiveStyle = Style;
+        }
 
         FRandomStream BldStream(FMath::RoundToInt(City.Position.X) * 73 + FMath::RoundToInt(City.Position.Y) * 37);
 
@@ -858,7 +897,7 @@ void UWorldRenderer::UpdateSettlementEntities()
         int32 MaxHouses = FMath::Clamp(FMath::FloorToInt((float)City.Population / PopPerHouse), 1, 150);
 
         for (int h = 0; h < MaxHouses; h++) {
-            float r = 14.0f * FMath::Sqrt((float)h);
+            float r = 25.0f * FMath::Sqrt((float)h);
             float theta = h * GoldenAngle;
             FVector2D HPos = City.Position + FVector2D(FMath::Cos(theta), FMath::Sin(theta)) * r;
 
@@ -870,14 +909,83 @@ void UWorldRenderer::UpdateSettlementEntities()
             if (DCell.SurfaceWater >= 1.0f || SCell.Elevation <= WorldManager->SeaLevel || SCell.Elevation > WorldManager->SeaLevel + 800.0f) continue;
             if (DCell.GlacierIce > 0.5f) continue;
 
-            FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
-            float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
-            FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
+            if (!ActiveStyle) {
+                FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
+                float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
+                FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
+                float RandomScale = BldStream.FRandRange(0.15f, 0.25f);
+                OldTransforms.Add(FTransform(Rot, Loc, FVector(RandomScale)));
+                OldColors.Add(City.Color);
+                continue;
+            }
 
-            float RandomScale = BldStream.FRandRange(0.15f, 0.25f);
+            int32 SizeX = BldStream.RandRange(1, (ActiveStyle->bRequiresMasonry ? 3 : 2));
+            int32 SizeY = BldStream.RandRange(1, (ActiveStyle->bRequiresMasonry ? 3 : 2));
+            float GSize = ActiveStyle->GridSize;
+            float WHeight = ActiveStyle->WallHeight;
+            int32 Stories = (ActiveStyle->bRequiresMasonry && BldStream.FRand() > 0.5f) ? 2 : 1;
+            if (ActiveStyle->bRequiresIndustrial && BldStream.FRand() > 0.3f) Stories = BldStream.RandRange(2, 5);
 
-            Transforms.Add(FTransform(Rot, Loc, FVector(RandomScale)));
-            Colors.Add(City.Color);
+            float OffsetX = -(SizeX * GSize) * 0.5f;
+            float OffsetY = -(SizeY * GSize) * 0.5f;
+            float RotOffset = BldStream.FRandRange(0.0f, 360.0f);
+
+            // OPRAVA 2: Globalni zmenseni, aby domky nebyly vetsi nez kopce (nasadim cca 0.1)
+            float BaseScale = BldStream.FRandRange(0.08f, 0.12f);
+
+            // OPRAVA 3: BaseZ se vyresi jiz v teto zakladni transformaci
+            FTransform BaseHouseTransform(FRotator(0, RotOffset, 0), FVector(HPos.X, HPos.Y, SCell.Elevation), FVector(BaseScale));
+
+            auto AddModule = [&](const TArray<FBuildingMeshSlot>& Slots, FVector LocalPos, float Yaw) {
+                if (Slots.Num() == 0) return;
+                const FBuildingMeshSlot& Slot = Slots[BldStream.RandRange(0, Slots.Num() - 1)];
+                if (!Slot.Mesh) return;
+
+                FTransform ModuleLocal(FRotator(0, Yaw, 0), LocalPos);
+                FTransform Adjustment(Slot.RelativeRotation, Slot.RelativeLocation, Slot.RelativeScale);
+                FTransform FinalTransform = Adjustment * ModuleLocal * BaseHouseTransform;
+
+                MeshBatches.FindOrAdd(Slot.Mesh).Add(FinalTransform);
+                ColorBatches.FindOrAdd(Slot.Mesh).Add(City.Color);
+                };
+
+            for (int s = 0; s < Stories; s++) {
+                // OPRAVA 3 pokracovani: StoryZ nesmi obsahovat SCell.Elevation, BaseHouseTransform uz to ma!
+                float StoryZ = (s * WHeight);
+
+                for (int x = 0; x < SizeX; x++) {
+                    for (int y = 0; y < SizeY; y++) {
+                        FVector CellCenter(OffsetX + (x * GSize) + (GSize * 0.5f), OffsetY + (y * GSize) + (GSize * 0.5f), StoryZ);
+
+                        AddModule(ActiveStyle->Floors, CellCenter, 0.0f);
+
+                        if (s == Stories - 1) {
+                            AddModule(ActiveStyle->Roofs, CellCenter + FVector(0, 0, WHeight), 0.0f);
+                        }
+
+                        bool bHasDoorAllowed = (s == 0);
+                        auto PlaceWall = [&](FVector WOffset, float Yaw, bool bAllowDoor) {
+                            float Rnd = BldStream.FRand();
+                            if (bAllowDoor && ActiveStyle->WallsWithDoor.Num() > 0 && Rnd > 0.8f) {
+                                AddModule(ActiveStyle->WallsWithDoor, CellCenter + WOffset, Yaw);
+                            }
+                            else if (ActiveStyle->WallsWithWindow.Num() > 0 && Rnd > 0.4f) {
+                                AddModule(ActiveStyle->WallsWithWindow, CellCenter + WOffset, Yaw);
+                            }
+                            else {
+                                AddModule(ActiveStyle->Walls, CellCenter + WOffset, Yaw);
+                            }
+                            };
+
+                        // OPRAVA 1: Rotace pri sestavovani zdi. Unreal Grid pozaduje pro predo-zadni zdi rotaci 0/180
+                        // a pro levo-prave zdi rotaci -90/90. Tvar + se tak konecne spoji do krabice [].
+                        if (x == 0) PlaceWall(FVector(-GSize * 0.5f, 0, 0), -90.0f, false);
+                        if (x == SizeX - 1) PlaceWall(FVector(GSize * 0.5f, 0, 0), 90.0f, false);
+                        if (y == 0) PlaceWall(FVector(0, -GSize * 0.5f, 0), 0.0f, bHasDoorAllowed);
+                        if (y == SizeY - 1) PlaceWall(FVector(0, GSize * 0.5f, 0), 180.0f, false);
+                    }
+                }
+            }
         }
 
         for (FIntPoint Coord : City.ClaimedCells) {
@@ -890,20 +998,16 @@ void UWorldRenderer::UpdateSettlementEntities()
                 FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
 
                 if (SCell.BuildingType == EBuildingType::Mine) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
-                    Colors.Add(FLinearColor(0.2f, 0.2f, 0.2f, 1.0f));
+                    OldTransforms.Add(FTransform(Rot, Loc, FVector(0.5f))); OldColors.Add(FLinearColor(0.2f, 0.2f, 0.2f, 1.0f));
                 }
                 else if (SCell.BuildingType == EBuildingType::LumberCamp) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.35f)));
-                    Colors.Add(FLinearColor(0.35f, 0.20f, 0.10f, 1.0f));
+                    OldTransforms.Add(FTransform(Rot, Loc, FVector(0.35f))); OldColors.Add(FLinearColor(0.35f, 0.20f, 0.10f, 1.0f));
                 }
                 else if (SCell.BuildingType == EBuildingType::Blacksmith) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.4f)));
-                    Colors.Add(FLinearColor(0.3f, 0.05f, 0.05f, 1.0f));
+                    OldTransforms.Add(FTransform(Rot, Loc, FVector(0.4f))); OldColors.Add(FLinearColor(0.3f, 0.05f, 0.05f, 1.0f));
                 }
                 else if (SCell.BuildingType == EBuildingType::Market) {
-                    Transforms.Add(FTransform(Rot, Loc, FVector(0.5f)));
-                    Colors.Add(FLinearColor(0.9f, 0.7f, 0.1f, 1.0f));
+                    OldTransforms.Add(FTransform(Rot, Loc, FVector(0.5f))); OldColors.Add(FLinearColor(0.9f, 0.7f, 0.1f, 1.0f));
                 }
             }
         }
@@ -971,7 +1075,26 @@ void UWorldRenderer::UpdateSettlementEntities()
         HISM->MarkRenderStateDirty();
         };
 
-    SyncHISM(SettlementHISM, Transforms, Colors);
+    SyncHISM(SettlementHISM, OldTransforms, OldColors);
+
+    for (auto& Pair : DynamicMeshInstancers) {
+        if (Pair.Value) Pair.Value->ClearInstances();
+    }
+
+    for (auto& Pair : MeshBatches) {
+        UStaticMesh* Mesh = Pair.Key;
+        UHierarchicalInstancedStaticMeshComponent* Instancer = GetOrAddInstancer(Mesh);
+        if (Instancer && Pair.Value.Num() > 0) {
+            Instancer->AddInstances(Pair.Value, false);
+            for (int i = 0; i < Pair.Value.Num(); ++i) {
+                FLinearColor C = ColorBatches[Mesh][i];
+                Instancer->SetCustomDataValue(i, 0, C.R, false);
+                Instancer->SetCustomDataValue(i, 1, C.G, false);
+                Instancer->SetCustomDataValue(i, 2, C.B, false);
+            }
+        }
+    }
+
     WorldManager->bSettlementVisualDirty = false;
 }
 
