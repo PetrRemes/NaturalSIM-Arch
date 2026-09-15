@@ -948,6 +948,53 @@ void USettlementSystem::ProcessDailyDemographics(ASimWorldManager* Manager) {
         if (City.Knowledge.UnlockedTechnologies.Contains("Industrial Mass Production")) BaseCap = 15000.0f;
         if (City.Knowledge.UnlockedTechnologies.Contains("Sustainable Infrastructure")) BaseCap = 50000.0f;
 
+        // --- NOVA LOGIKA BUDOV (ZAKLADY) ---
+        int32 PopPerHouse = 50;
+        int32 TargetHouses = FMath::Clamp(FMath::FloorToInt((float)City.Population / PopPerHouse), 1, 500);
+
+        if (City.Houses.Num() < TargetHouses) {
+            float GoldenAngle = 137.507764f * (PI / 180.0f);
+            FRandomStream BldStream(FMath::RoundToInt(City.Position.X) * 13 + City.Houses.Num() * 7);
+
+            EBuildingEra CurrentEra = EBuildingEra::Primitive;
+            if (City.Knowledge.UnlockedTechnologies.Contains("Industrial Mass Production")) CurrentEra = EBuildingEra::Industrial;
+            else if (City.Knowledge.Levels.Contains(EKnowledgeField::Masonry) && City.Knowledge.Levels[EKnowledgeField::Masonry] >= 5.0f) CurrentEra = EBuildingEra::Masonry;
+
+            int32 Attempts = 0;
+            int32 PlacedThisTick = 0;
+
+            while (City.Houses.Num() < TargetHouses && Attempts < 50) {
+                Attempts++;
+                int32 h = City.Houses.Num() + Attempts;
+                float r = 25.0f * FMath::Sqrt((float)h);
+                float theta = h * GoldenAngle;
+                FVector2D HPos = City.Position + FVector2D(FMath::Cos(theta), FMath::Sin(theta)) * r;
+
+                int32 GlobalX = FMath::FloorToInt(HPos.X / 50.0f);
+                int32 GlobalY = FMath::FloorToInt(HPos.Y / 50.0f);
+
+                FCellStaticData SCell; FCellDynamicData DCell;
+                if (!Manager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) continue;
+
+                // OPRAVA 1: STRIKTNÍ KONTROLA VODY (Domy už nebudou ve vodì)
+                if (DCell.SurfaceWater > 0.05f || SCell.Elevation <= Manager->SeaLevel + 5.0f || SCell.WaterType != EWaterType::None) continue;
+                if (DCell.GlacierIce > 0.5f) continue;
+
+                FHouseFootprint NewHouse;
+                NewHouse.Position = HPos;
+                NewHouse.Yaw = BldStream.FRandRange(0.0f, 360.0f);
+                NewHouse.Scale = BldStream.FRandRange(0.08f, 0.12f);
+                NewHouse.Era = CurrentEra;
+
+                City.Houses.Add(NewHouse);
+                PlacedThisTick++;
+
+                if (PlacedThisTick > 5) break;
+            }
+            Manager->bSettlementVisualDirty = true;
+        }
+        // -----------------------------------
+
         int32 SplitThreshold = FMath::RoundToInt(BaseCap * 0.8f);
         if (City.Population >= SplitThreshold && City.SplitCount < 5 && CurrentGlobalPop < Manager->MaxGlobalPopulation && FoodReserve > 100.0f && Manager->HumanModule) {
             FTribeData Settlers;
@@ -1022,183 +1069,6 @@ void USettlementSystem::ProcessDailyDemographics(ASimWorldManager* Manager) {
 
 void USettlementSystem::BuildSettlementMesh(TSharedPtr<FChunkMeshData> MeshData, FIntPoint ChunkCoord, ASimWorldManager* Manager)
 {
-    if (!Manager || !MeshData.IsValid()) return;
-
-    FChunkData* Chunk = Manager->WorldChunks.Find(ChunkCoord);
-    if (!Chunk) return;
-
-    int32 ChunkSize = Manager->ChunkSize;
-    float CellSize = 50.0f;
-    float ChunkWorldSize = (ChunkSize - 1) * CellSize;
-
-    FVector SunDir(-0.6f, -0.6f, 0.7f);
-    SunDir.Normalize();
-    float Ambient = 0.4f;
-    float DiffuseMult = 0.8f;
-
-    auto AddTri = [&](FVector A, FVector B, FVector C, FLinearColor Color) {
-        FVector N = FVector::CrossProduct(B - A, C - A).GetSafeNormal();
-        float Light = Ambient + FMath::Max(0.0f, FVector::DotProduct(N, SunDir)) * DiffuseMult;
-        FLinearColor FinalColor = Color * Light;
-        FinalColor.A = 1.0f;
-
-        int32 V = MeshData->SettlementVertices.Num();
-        MeshData->SettlementVertices.Add(A);
-        MeshData->SettlementVertices.Add(B);
-        MeshData->SettlementVertices.Add(C);
-
-        for (int i = 0; i < 3; i++) {
-            MeshData->SettlementTriangles.Add(V + i);
-            MeshData->SettlementUV0.Add(FVector2D::ZeroVector);
-            MeshData->SettlementColors.Add(FinalColor);
-        }
-        };
-
-    auto AddQuad = [&](FVector A, FVector B, FVector C, FVector D, FLinearColor Color) {
-        AddTri(A, B, C, Color);
-        AddTri(C, D, A, Color);
-        };
-
-    auto AddBox = [&](FVector Center, FVector Extent, FLinearColor Color) {
-        FVector P[8];
-        P[0] = Center + FVector(-Extent.X, -Extent.Y, -Extent.Z);
-        P[1] = Center + FVector(Extent.X, -Extent.Y, -Extent.Z);
-        P[2] = Center + FVector(Extent.X, Extent.Y, -Extent.Z);
-        P[3] = Center + FVector(-Extent.X, Extent.Y, -Extent.Z);
-        P[4] = Center + FVector(-Extent.X, -Extent.Y, Extent.Z);
-        P[5] = Center + FVector(Extent.X, -Extent.Y, Extent.Z);
-        P[6] = Center + FVector(Extent.X, Extent.Y, Extent.Z);
-        P[7] = Center + FVector(-Extent.X, Extent.Y, Extent.Z);
-
-        AddQuad(P[3], P[2], P[1], P[0], Color);
-        AddQuad(P[4], P[5], P[6], P[7], Color);
-        AddQuad(P[0], P[1], P[5], P[4], Color);
-        AddQuad(P[1], P[2], P[6], P[5], Color);
-        AddQuad(P[2], P[3], P[7], P[6], Color);
-        AddQuad(P[3], P[0], P[4], P[7], Color);
-        };
-
-    auto AddPyramid = [&](FVector Center, FVector Extent, float Height, FLinearColor Color) {
-        FVector P[4];
-        P[0] = Center + FVector(-Extent.X, -Extent.Y, 0);
-        P[1] = Center + FVector(Extent.X, -Extent.Y, 0);
-        P[2] = Center + FVector(Extent.X, Extent.Y, 0);
-        P[3] = Center + FVector(-Extent.X, Extent.Y, 0);
-        FVector Top = Center + FVector(0, 0, Height);
-
-        AddQuad(P[3], P[2], P[1], P[0], Color);
-        AddTri(P[0], P[1], Top, Color);
-        AddTri(P[1], P[2], Top, Color);
-        AddTri(P[2], P[3], Top, Color);
-        AddTri(P[3], P[0], Top, Color);
-        };
-
-    for (int32 Y = 0; Y < ChunkSize; Y++) {
-        for (int32 X = 0; X < ChunkSize; X++) {
-            int32 Idx = X + Y * ChunkSize;
-            if (Idx >= Chunk->StaticCells.Num()) continue;
-
-            const FCellStaticData& SCell = Chunk->StaticCells[Idx];
-            const FCellDynamicData& DCell = Chunk->DynamicCells[Idx];
-
-            if (DCell.HouseDensity <= 0.0f && SCell.BuildingType == EBuildingType::None) continue;
-
-            float LocalX = (ChunkCoord.X * ChunkWorldSize) + (X * CellSize);
-            float LocalY = (ChunkCoord.Y * ChunkWorldSize) + (Y * CellSize);
-            float Z = SCell.Elevation;
-
-            FLinearColor BaseColor = SCell.PoliticalColor.A > 0.1f ? SCell.PoliticalColor : FLinearColor(0.8f, 0.8f, 0.8f, 1.0f);
-            FRandomStream Stream(Manager->MapSeed + Idx);
-
-            if (DCell.HouseDensity > 0.0f) {
-                int32 NumHouses = FMath::Clamp(FMath::RoundToInt(DCell.HouseDensity * 4.0f), 1, 4);
-                for (int32 h = 0; h < NumHouses; h++) {
-                    float HX = LocalX + Stream.FRandRange(-15.0f, 15.0f);
-                    float HY = LocalY + Stream.FRandRange(-15.0f, 15.0f);
-                    float HW = Stream.FRandRange(4.0f, 6.0f);
-                    float HH = Stream.FRandRange(5.0f, 8.0f);
-
-                    FVector HCenter(HX, HY, Z + (HH * 0.5f));
-                    AddBox(HCenter, FVector(HW, HW, HH * 0.5f), FLinearColor(0.7f, 0.6f, 0.5f, 1.0f));
-                    AddPyramid(FVector(HX, HY, Z + HH), FVector(HW + 1.0f, HW + 1.0f, 0), HW * 0.8f, BaseColor);
-                }
-            }
-
-            FVector C(LocalX, LocalY, Z);
-            switch (SCell.BuildingType) {
-            case EBuildingType::Farm:
-            case EBuildingType::EcoFarm: {
-                FLinearColor FieldColor = (SCell.BuildingType == EBuildingType::EcoFarm) ? FLinearColor(0.1f, 0.8f, 0.2f, 1.0f) : FLinearColor(0.6f, 0.5f, 0.2f, 1.0f);
-                AddBox(C + FVector(0, 0, 1.0f), FVector(20.0f, 20.0f, 1.0f), FieldColor);
-                break;
-            }
-            case EBuildingType::LumberCamp:
-            case EBuildingType::ForestryCenter: {
-                AddBox(C + FVector(0, 0, 4.0f), FVector(8.0f, 12.0f, 4.0f), FLinearColor(0.4f, 0.25f, 0.1f, 1.0f));
-                break;
-            }
-            case EBuildingType::Mine: {
-                AddBox(C + FVector(0, 0, 5.0f), FVector(10.0f, 10.0f, 5.0f), FLinearColor(0.2f, 0.2f, 0.2f, 1.0f));
-                AddBox(C + FVector(12.0f, 0, 10.0f), FVector(2.0f, 2.0f, 10.0f), FLinearColor(0.3f, 0.2f, 0.1f, 1.0f));
-                break;
-            }
-            case EBuildingType::Blacksmith:
-            case EBuildingType::Factory:
-            case EBuildingType::PowerPlant_Coal: {
-                float Size = (SCell.BuildingType == EBuildingType::Blacksmith) ? 8.0f : 15.0f;
-                float Height = (SCell.BuildingType == EBuildingType::Blacksmith) ? 6.0f : 12.0f;
-                FLinearColor Brick = FLinearColor(0.5f, 0.2f, 0.15f, 1.0f);
-                AddBox(C + FVector(0, 0, Height * 0.5f), FVector(Size, Size, Height * 0.5f), Brick);
-                AddBox(C + FVector(Size * 0.5f, Size * 0.5f, Height + 10.0f), FVector(Size * 0.2f, Size * 0.2f, 10.0f), FLinearColor(0.1f, 0.1f, 0.1f, 1.0f));
-                break;
-            }
-            case EBuildingType::Market:
-            case EBuildingType::LogisticsCenter: {
-                AddBox(C + FVector(0, 0, 5.0f), FVector(18.0f, 18.0f, 5.0f), BaseColor);
-                AddBox(C + FVector(0, 0, 12.0f), FVector(10.0f, 10.0f, 2.0f), FLinearColor::White);
-                break;
-            }
-            case EBuildingType::Castle: {
-                AddBox(C + FVector(0, 0, 15.0f), FVector(15.0f, 15.0f, 15.0f), FLinearColor(0.4f, 0.4f, 0.4f, 1.0f));
-                AddBox(C + FVector(15.0f, 15.0f, 20.0f), FVector(4.0f, 4.0f, 20.0f), BaseColor);
-                AddBox(C + FVector(-15.0f, 15.0f, 20.0f), FVector(4.0f, 4.0f, 20.0f), BaseColor);
-                AddBox(C + FVector(15.0f, -15.0f, 20.0f), FVector(4.0f, 4.0f, 20.0f), BaseColor);
-                AddBox(C + FVector(-15.0f, -15.0f, 20.0f), FVector(4.0f, 4.0f, 20.0f), BaseColor);
-                break;
-            }
-            case EBuildingType::Port: {
-                AddBox(C + FVector(0, 0, 2.0f), FVector(20.0f, 5.0f, 2.0f), FLinearColor(0.3f, 0.2f, 0.1f, 1.0f));
-                AddBox(C + FVector(10.0f, 10.0f, 6.0f), FVector(8.0f, 8.0f, 6.0f), BaseColor);
-                break;
-            }
-            case EBuildingType::Airport: {
-                AddBox(C + FVector(0, 0, 1.0f), FVector(40.0f, 10.0f, 1.0f), FLinearColor(0.1f, 0.1f, 0.1f, 1.0f));
-                AddBox(C + FVector(0, 15.0f, 4.0f), FVector(10.0f, 5.0f, 4.0f), BaseColor);
-                break;
-            }
-            case EBuildingType::PowerPlant_Nuclear: {
-                AddBox(C + FVector(0, 0, 15.0f), FVector(12.0f, 12.0f, 15.0f), FLinearColor(0.7f, 0.7f, 0.7f, 1.0f));
-                AddBox(C + FVector(15.0f, 0, 20.0f), FVector(8.0f, 8.0f, 20.0f), FLinearColor(0.6f, 0.6f, 0.6f, 1.0f));
-                break;
-            }
-            case EBuildingType::OilRig: {
-                AddBox(C + FVector(0, 0, 10.0f), FVector(15.0f, 15.0f, 2.0f), FLinearColor(0.2f, 0.2f, 0.2f, 1.0f));
-                AddBox(C + FVector(0, 0, 20.0f), FVector(4.0f, 4.0f, 10.0f), BaseColor);
-                AddBox(C + FVector(10.0f, 10.0f, 5.0f), FVector(1.0f, 1.0f, 5.0f), FLinearColor(0.1f, 0.1f, 0.1f, 1.0f));
-                AddBox(C + FVector(-10.0f, 10.0f, 5.0f), FVector(1.0f, 1.0f, 5.0f), FLinearColor(0.1f, 0.1f, 0.1f, 1.0f));
-                AddBox(C + FVector(10.0f, -10.0f, 5.0f), FVector(1.0f, 1.0f, 5.0f), FLinearColor(0.1f, 0.1f, 0.1f, 1.0f));
-                AddBox(C + FVector(-10.0f, -10.0f, 5.0f), FVector(1.0f, 1.0f, 5.0f), FLinearColor(0.1f, 0.1f, 0.1f, 1.0f));
-                break;
-            }
-            case EBuildingType::AICenter: {
-                AddBox(C + FVector(0, 0, 8.0f), FVector(15.0f, 15.0f, 8.0f), FLinearColor(0.1f, 0.1f, 0.2f, 1.0f));
-                AddBox(C + FVector(0, 0, 16.0f), FVector(10.0f, 10.0f, 2.0f), FLinearColor(0.0f, 0.8f, 1.0f, 1.0f));
-                break;
-            }
-            default: break;
-            }
-        }
-    }
 }
 
 bool USettlementSystem::TryBoostCulturalPillar(int32 SettlementID, ECulturalPillar Pillar, ASimWorldManager* Manager)

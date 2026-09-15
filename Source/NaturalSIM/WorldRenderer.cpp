@@ -874,47 +874,39 @@ void UWorldRenderer::UpdateSettlementEntities()
     TArray<FTransform> OldTransforms; OldTransforms.Reserve(5000);
     TArray<FLinearColor> OldColors; OldColors.Reserve(5000);
 
-    float GoldenAngle = 137.507764f * (PI / 180.0f);
+    UBuildingStyleData* StylePrimitive = nullptr;
+    UBuildingStyleData* StyleMasonry = nullptr;
+    UBuildingStyleData* StyleIndustrial = nullptr;
+
+    for (UBuildingStyleData* Style : AvailableBuildingStyles) {
+        if (!Style) continue;
+        if (Style->bRequiresIndustrial) StyleIndustrial = Style;
+        else if (Style->bRequiresMasonry) StyleMasonry = Style;
+        else StylePrimitive = Style;
+    }
 
     for (const FSettlementData& City : WorldManager->SettlementModule->Settlements) {
         if (City.Population <= 0) continue;
 
-        UBuildingStyleData* ActiveStyle = nullptr;
-        for (UBuildingStyleData* Style : AvailableBuildingStyles) {
-            if (!Style) continue;
-            bool bHasMasonry = City.Knowledge.Levels.Contains(EKnowledgeField::Masonry) && City.Knowledge.Levels[EKnowledgeField::Masonry] >= 5.0f;
-            bool bHasIndustry = City.Knowledge.UnlockedTechnologies.Contains("Industrial Mass Production");
-
-            if (Style->bRequiresIndustrial && !bHasIndustry) continue;
-            if (Style->bRequiresMasonry && !bHasMasonry) continue;
-
-            ActiveStyle = Style;
-        }
-
         FRandomStream BldStream(FMath::RoundToInt(City.Position.X) * 73 + FMath::RoundToInt(City.Position.Y) * 37);
 
-        int32 PopPerHouse = 50;
-        int32 MaxHouses = FMath::Clamp(FMath::FloorToInt((float)City.Population / PopPerHouse), 1, 150);
+        // -- Vykresleni ulozenych budov z historie --
+        for (const FHouseFootprint& House : City.Houses) {
 
-        for (int h = 0; h < MaxHouses; h++) {
-            float r = 25.0f * FMath::Sqrt((float)h);
-            float theta = h * GoldenAngle;
-            FVector2D HPos = City.Position + FVector2D(FMath::Cos(theta), FMath::Sin(theta)) * r;
+            UBuildingStyleData* ActiveStyle = StylePrimitive;
+            if (House.Era == EBuildingEra::Industrial && StyleIndustrial) ActiveStyle = StyleIndustrial;
+            else if (House.Era == EBuildingEra::Masonry && StyleMasonry) ActiveStyle = StyleMasonry;
 
-            int32 GlobalX = FMath::FloorToInt(HPos.X / 50.0f);
-            int32 GlobalY = FMath::FloorToInt(HPos.Y / 50.0f);
+            int32 GlobalX = FMath::FloorToInt(House.Position.X / 50.0f);
+            int32 GlobalY = FMath::FloorToInt(House.Position.Y / 50.0f);
 
             FCellStaticData SCell; FCellDynamicData DCell;
             if (!WorldManager->GetCellGlobal(GlobalX, GlobalY, SCell, DCell)) continue;
-            if (DCell.SurfaceWater >= 1.0f || SCell.Elevation <= WorldManager->SeaLevel || SCell.Elevation > WorldManager->SeaLevel + 800.0f) continue;
-            if (DCell.GlacierIce > 0.5f) continue;
 
             if (!ActiveStyle) {
-                FVector Loc(HPos.X, HPos.Y, SCell.Elevation);
-                float RandomYaw = BldStream.FRandRange(0.0f, 360.0f);
-                FQuat Rot = FRotator(0.0f, RandomYaw, 0.0f).Quaternion();
-                float RandomScale = BldStream.FRandRange(0.15f, 0.25f);
-                OldTransforms.Add(FTransform(Rot, Loc, FVector(RandomScale)));
+                FVector Loc(House.Position.X, House.Position.Y, SCell.Elevation);
+                FQuat Rot = FRotator(0.0f, House.Yaw, 0.0f).Quaternion();
+                OldTransforms.Add(FTransform(Rot, Loc, FVector(House.Scale)));
                 OldColors.Add(City.Color);
                 continue;
             }
@@ -928,13 +920,8 @@ void UWorldRenderer::UpdateSettlementEntities()
 
             float OffsetX = -(SizeX * GSize) * 0.5f;
             float OffsetY = -(SizeY * GSize) * 0.5f;
-            float RotOffset = BldStream.FRandRange(0.0f, 360.0f);
 
-            // OPRAVA 2: Globalni zmenseni, aby domky nebyly vetsi nez kopce (nasadim cca 0.1)
-            float BaseScale = BldStream.FRandRange(0.08f, 0.12f);
-
-            // OPRAVA 3: BaseZ se vyresi jiz v teto zakladni transformaci
-            FTransform BaseHouseTransform(FRotator(0, RotOffset, 0), FVector(HPos.X, HPos.Y, SCell.Elevation), FVector(BaseScale));
+            FTransform BaseHouseTransform(FRotator(0, House.Yaw, 0), FVector(House.Position.X, House.Position.Y, SCell.Elevation), FVector(House.Scale));
 
             auto AddModule = [&](const TArray<FBuildingMeshSlot>& Slots, FVector LocalPos, float Yaw) {
                 if (Slots.Num() == 0) return;
@@ -950,7 +937,6 @@ void UWorldRenderer::UpdateSettlementEntities()
                 };
 
             for (int s = 0; s < Stories; s++) {
-                // OPRAVA 3 pokracovani: StoryZ nesmi obsahovat SCell.Elevation, BaseHouseTransform uz to ma!
                 float StoryZ = (s * WHeight);
 
                 for (int x = 0; x < SizeX; x++) {
@@ -977,8 +963,6 @@ void UWorldRenderer::UpdateSettlementEntities()
                             }
                             };
 
-                        // OPRAVA 1: Rotace pri sestavovani zdi. Unreal Grid pozaduje pro predo-zadni zdi rotaci 0/180
-                        // a pro levo-prave zdi rotaci -90/90. Tvar + se tak konecne spoji do krabice [].
                         if (x == 0) PlaceWall(FVector(-GSize * 0.5f, 0, 0), -90.0f, false);
                         if (x == SizeX - 1) PlaceWall(FVector(GSize * 0.5f, 0, 0), 90.0f, false);
                         if (y == 0) PlaceWall(FVector(0, -GSize * 0.5f, 0), 0.0f, bHasDoorAllowed);
@@ -988,6 +972,7 @@ void UWorldRenderer::UpdateSettlementEntities()
             }
         }
 
+        // Vykresleni zminenych bunek (doly, farmy)
         for (FIntPoint Coord : City.ClaimedCells) {
             FCellStaticData SCell; FCellDynamicData DCell;
             if (WorldManager->GetCellGlobal(Coord.X, Coord.Y, SCell, DCell)) {
@@ -1077,21 +1062,17 @@ void UWorldRenderer::UpdateSettlementEntities()
 
     SyncHISM(SettlementHISM, OldTransforms, OldColors);
 
-    for (auto& Pair : DynamicMeshInstancers) {
-        if (Pair.Value) Pair.Value->ClearInstances();
-    }
-
     for (auto& Pair : MeshBatches) {
         UStaticMesh* Mesh = Pair.Key;
         UHierarchicalInstancedStaticMeshComponent* Instancer = GetOrAddInstancer(Mesh);
-        if (Instancer && Pair.Value.Num() > 0) {
-            Instancer->AddInstances(Pair.Value, false);
-            for (int i = 0; i < Pair.Value.Num(); ++i) {
-                FLinearColor C = ColorBatches[Mesh][i];
-                Instancer->SetCustomDataValue(i, 0, C.R, false);
-                Instancer->SetCustomDataValue(i, 1, C.G, false);
-                Instancer->SetCustomDataValue(i, 2, C.B, false);
-            }
+        if (Instancer) {
+            SyncHISM(Instancer, Pair.Value, ColorBatches[Mesh]);
+        }
+    }
+
+    for (auto& Pair : DynamicMeshInstancers) {
+        if (!MeshBatches.Contains(Pair.Key)) {
+            SyncHISM(Pair.Value, TArray<FTransform>(), TArray<FLinearColor>());
         }
     }
 

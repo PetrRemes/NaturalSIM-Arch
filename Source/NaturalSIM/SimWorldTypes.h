@@ -227,11 +227,6 @@ struct FChunkHeatmap
     UPROPERTY() float AvgRainfall = 0.0f;
 };
 
-// =========================================================================
-// OPTIMALIZACE 4: SOA (Structure of Arrays) rozdìlení pùvodního FCellData
-// =========================================================================
-
-// Statická data: Základní geologie, tvar, biom a vlastnictví (Mìní se zøídka)
 USTRUCT(BlueprintType)
 struct FCellStaticData
 {
@@ -264,7 +259,6 @@ struct FCellStaticData
     UPROPERTY(BlueprintReadWrite) int32 FlowDirectionGlobalY = -1;
 };
 
-// Dynamická data: Voda, Oheò, Listí, Zneèištìní (Poèítá se každý tik)
 USTRUCT(BlueprintType)
 struct FCellDynamicData
 {
@@ -330,7 +324,6 @@ USTRUCT(BlueprintType)
 struct FChunkData
 {
     GENERATED_BODY()
-    // OPTIMALIZACE 4: Dvì oddìlená pole, Cache locality = King
     UPROPERTY() TArray<FCellStaticData> StaticCells;
     UPROPERTY() TArray<FCellDynamicData> DynamicCells;
 
@@ -631,6 +624,26 @@ struct FTribeData
     UPROPERTY(BlueprintReadWrite) float TrackingConfidence = 0.0f;
 };
 
+// -- NOVA HISTORICKA STRUKTURA --
+UENUM(BlueprintType)
+enum class EBuildingEra : uint8
+{
+    Primitive,
+    Masonry,
+    Industrial
+};
+
+USTRUCT(BlueprintType)
+struct FHouseFootprint
+{
+    GENERATED_BODY()
+    UPROPERTY() FVector2D Position = FVector2D::ZeroVector;
+    UPROPERTY() float Yaw = 0.0f;
+    UPROPERTY() float Scale = 1.0f;
+    UPROPERTY() EBuildingEra Era = EBuildingEra::Primitive;
+};
+// -------------------------------
+
 USTRUCT(BlueprintType)
 struct FSettlementData
 {
@@ -660,6 +673,9 @@ struct FSettlementData
     UPROPERTY(BlueprintReadWrite) float ExpansionPoints = 0.0f;
     UPROPERTY() TSet<FIntPoint> ClaimedCells;
     UPROPERTY() TArray<FIntPoint> BorderCells;
+
+    // -- PAMET DOMU --
+    UPROPERTY() TArray<FHouseFootprint> Houses;
 };
 
 USTRUCT(BlueprintType)
