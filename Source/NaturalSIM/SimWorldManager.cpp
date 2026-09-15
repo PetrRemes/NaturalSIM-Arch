@@ -214,7 +214,6 @@ void ASimWorldManager::SyncChunkEdges(const TSet<FIntPoint>& ActiveChunks) {
 }
 
 void ASimWorldManager::UpdateActiveRegions() {
-	// OPTIMALIZACE: Rychlé a bezpeèné pøebudování seznamu bez O(N) shiftování pamìti
 	ActiveChunkKeys.Reset();
 	StableChunkKeys.Reset();
 
@@ -523,13 +522,12 @@ void ASimWorldManager::GenerateChunk(FIntPoint ChunkCoordinate, bool bIsFullGene
 			if (!WeakThis.IsValid() || !WeakThis->IsTaskValid(TaskToken)) { if (WeakThis.IsValid()) WeakThis->ActiveChunkTasks--; return; }
 			ASimWorldManager* FinalMain = WeakThis.Get();
 
+			// FIX CRASH: Vkládáme do hash mapy pouze pøi prvním generování. 
+			// Odstraòujeme nebezpeèný zápis bìhem vizuálního pøekreslování, který drtil ParallelFor a nièil pamì!
 			if (Result.bIsFullGeneration) {
 				FinalMain->WorldChunks.Add(Result.ChunkCoord, MoveTemp(*LocalChunk));
 				if (FinalMain->HeatmapModule) FinalMain->HeatmapModule->ChunkHeatmaps.Add(Result.ChunkCoord, Result.Heatmap);
 				FinalMain->bKeysDirty = true;
-			}
-			else if (FChunkData* TargetChunk = FinalMain->WorldChunks.Find(Result.ChunkCoord)) {
-				*TargetChunk = MoveTemp(*LocalChunk);
 			}
 
 			FinalMain->PendingRenderQueue.Enqueue({ Result.ChunkCoord, Result.MeshData, Result.RenderedFlags });

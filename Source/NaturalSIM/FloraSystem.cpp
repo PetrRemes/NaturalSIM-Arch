@@ -268,7 +268,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
 
         FIntPoint Coord = ChunkKeys[idx];
 
-        // FIX CRASH: Bezpeèné ètení z mapy
         FChunkData* ChunkPtr = WorldChunks.Find(Coord);
         if (!ChunkPtr) return;
         FChunkData& Chunk = *ChunkPtr;
@@ -681,30 +680,6 @@ void UFloraSystem::ProcessDailyGrowth(const TArray<FIntPoint>& ChunkKeys, TMap<F
                 int32 i = X + Y * Manager->ChunkSize;
                 Chunk.DynamicCells[i].FireIntensity = Chunk.DynamicCells[i].FireIntensityBuffer;
             }
-        }
-
-        for (int32 step = 0; step < Manager->ChunkSize; step++) {
-            int32 GlobalRightX = (Coord.X * CSize) + CSize;
-            int32 GlobalRightY = (Coord.Y * CSize) + step;
-            const FCellStaticData* RealRightS = nullptr; const FCellDynamicData* RealRightD = nullptr;
-            if (Manager->GetCellStaticGlobalPtr(GlobalRightX, GlobalRightY, RealRightS) && Manager->GetCellDynamicGlobalPtr(GlobalRightX, GlobalRightY, RealRightD)) {
-                Chunk.StaticCells[CSize + step * Manager->ChunkSize] = *RealRightS;
-                Chunk.DynamicCells[CSize + step * Manager->ChunkSize] = *RealRightD;
-            }
-
-            int32 GlobalBotX = (Coord.X * CSize) + step;
-            int32 GlobalBotY = (Coord.Y * CSize) + CSize;
-            const FCellStaticData* RealBotS = nullptr; const FCellDynamicData* RealBotD = nullptr;
-            if (Manager->GetCellStaticGlobalPtr(GlobalBotX, GlobalBotY, RealBotS) && Manager->GetCellDynamicGlobalPtr(GlobalBotX, GlobalBotY, RealBotD)) {
-                Chunk.StaticCells[step + CSize * Manager->ChunkSize] = *RealBotS;
-                Chunk.DynamicCells[step + CSize * Manager->ChunkSize] = *RealBotD;
-            }
-        }
-        const FCellStaticData* RealCornerS = nullptr; const FCellDynamicData* RealCornerD = nullptr;
-        if (Manager->GetCellStaticGlobalPtr((Coord.X * CSize) + CSize, (Coord.Y * CSize) + CSize, RealCornerS) &&
-            Manager->GetCellDynamicGlobalPtr((Coord.X * CSize) + CSize, (Coord.Y * CSize) + CSize, RealCornerD)) {
-            Chunk.StaticCells[CSize + CSize * Manager->ChunkSize] = *RealCornerS;
-            Chunk.DynamicCells[CSize + CSize * Manager->ChunkSize] = *RealCornerD;
         }
 
         if (LocalDirty != 0) SafeFlags[iter] |= LocalDirty;

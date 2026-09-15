@@ -374,8 +374,11 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
         FIntPoint Coord = ChunkKeys[idx];
-        if (!WorldChunks.Contains(Coord)) return;
-        FChunkData& Chunk = WorldChunks[Coord];
+
+        // FIX CRASH: Bezpeèné ètení
+        FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+        if (!ChunkPtr) return;
+        FChunkData& Chunk = *ChunkPtr;
 
         FHydroNeighborhood Halo;
         Halo.Initialize(Manager, Coord, Manager->ChunkSize);
@@ -480,8 +483,10 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
         FIntPoint Coord = ChunkKeys[idx];
-        if (!WorldChunks.Contains(Coord)) return;
-        FChunkData& Chunk = WorldChunks[Coord];
+
+        FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+        if (!ChunkPtr) return;
+        FChunkData& Chunk = *ChunkPtr;
 
         FHydroNeighborhood Halo;
         Halo.Initialize(Manager, Coord, Manager->ChunkSize);
@@ -575,8 +580,10 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
         int32 idx = StartIdx + iter;
         if (!ChunkKeys.IsValidIndex(idx)) return;
         FIntPoint Coord = ChunkKeys[idx];
-        if (!WorldChunks.Contains(Coord)) return;
-        FChunkData& Chunk = WorldChunks[Coord];
+
+        FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+        if (!ChunkPtr) return;
+        FChunkData& Chunk = *ChunkPtr;
 
         for (int32 Y = 0; Y < CSize; Y++) {
             for (int32 X = 0; X < CSize; X++) {
@@ -605,8 +612,10 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             int32 idx = StartIdx + iter;
             if (!ChunkKeys.IsValidIndex(idx)) return;
             FIntPoint Coord = ChunkKeys[idx];
-            if (!WorldChunks.Contains(Coord)) return;
-            FChunkData& Chunk = WorldChunks[Coord];
+
+            FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+            if (!ChunkPtr) return;
+            FChunkData& Chunk = *ChunkPtr;
 
             FHydroNeighborhood Halo;
             Halo.Initialize(Manager, Coord, Manager->ChunkSize);
@@ -788,8 +797,10 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             int32 idx = StartIdx + iter;
             if (!ChunkKeys.IsValidIndex(idx)) return;
             FIntPoint Coord = ChunkKeys[idx];
-            if (!WorldChunks.Contains(Coord)) return;
-            FChunkData& Chunk = WorldChunks[Coord];
+
+            FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+            if (!ChunkPtr) return;
+            FChunkData& Chunk = *ChunkPtr;
 
             for (int32 Y = 0; Y < CSize; Y++) {
                 for (int32 X = 0; X < CSize; X++) {
@@ -806,8 +817,10 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
             int32 idx = StartIdx + iter;
             if (!ChunkKeys.IsValidIndex(idx)) return;
             FIntPoint Coord = ChunkKeys[idx];
-            if (!WorldChunks.Contains(Coord)) return;
-            FChunkData& Chunk = WorldChunks[Coord];
+
+            FChunkData* ChunkPtr = WorldChunks.Find(Coord);
+            if (!ChunkPtr) return;
+            FChunkData& Chunk = *ChunkPtr;
 
             FHydroNeighborhood Halo;
             Halo.Initialize(Manager, Coord, Manager->ChunkSize);
@@ -858,30 +871,6 @@ void UHydroSystem::ProcessHydroSlice(const TArray<FIntPoint>& ChunkKeys, TMap<FI
                         SCell.BankHeight = FMath::Lerp(SCell.BankHeight, DCell.Sediment * 0.2f, 0.02f * DeltaDays);
                     }
                 }
-            }
-
-            for (int32 step = 0; step < Manager->ChunkSize; step++) {
-                int32 GlobalRightX = (ChunkKeys[idx].X * CSize) + CSize;
-                int32 GlobalRightY = (ChunkKeys[idx].Y * CSize) + step;
-                const FCellStaticData* RealRightS = nullptr; const FCellDynamicData* RealRightD = nullptr;
-                if (Manager->GetCellStaticGlobalPtr(GlobalRightX, GlobalRightY, RealRightS) && Manager->GetCellDynamicGlobalPtr(GlobalRightX, GlobalRightY, RealRightD)) {
-                    Chunk.StaticCells[CSize + step * Manager->ChunkSize] = *RealRightS;
-                    Chunk.DynamicCells[CSize + step * Manager->ChunkSize] = *RealRightD;
-                }
-
-                int32 GlobalBotX = (ChunkKeys[idx].X * CSize) + step;
-                int32 GlobalBotY = (ChunkKeys[idx].Y * CSize) + CSize;
-                const FCellStaticData* RealBotS = nullptr; const FCellDynamicData* RealBotD = nullptr;
-                if (Manager->GetCellStaticGlobalPtr(GlobalBotX, GlobalBotY, RealBotS) && Manager->GetCellDynamicGlobalPtr(GlobalBotX, GlobalBotY, RealBotD)) {
-                    Chunk.StaticCells[step + CSize * Manager->ChunkSize] = *RealBotS;
-                    Chunk.DynamicCells[step + CSize * Manager->ChunkSize] = *RealBotD;
-                }
-            }
-            const FCellStaticData* RealCornerS = nullptr; const FCellDynamicData* RealCornerD = nullptr;
-            if (Manager->GetCellStaticGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerS) &&
-                Manager->GetCellDynamicGlobalPtr((ChunkKeys[idx].X * CSize) + CSize, (ChunkKeys[idx].Y * CSize) + CSize, RealCornerD)) {
-                Chunk.StaticCells[CSize + CSize * Manager->ChunkSize] = *RealCornerS;
-                Chunk.DynamicCells[CSize + CSize * Manager->ChunkSize] = *RealCornerD;
             }
 
             if (SafeFlags[iter] != 0) {

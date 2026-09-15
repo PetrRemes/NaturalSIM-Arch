@@ -14,11 +14,13 @@ UWorldRenderer::UWorldRenderer()
 
     TerrainMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("TerrainMesh"));
     TerrainMesh->SetupAttachment(this);
-    TerrainMesh->bUseAsyncCooking = true;
+    // FIX: Vypnutí kolizí a raytracingu chrání pamì pøed obøími memory leaky
+    TerrainMesh->bUseAsyncCooking = false;
+    TerrainMesh->bVisibleInRayTracing = false;
 
-    WaterMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("WaterMesh")); WaterMesh->SetupAttachment(this); WaterMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    FloraMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("FloraMesh")); FloraMesh->SetupAttachment(this); FloraMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    TransportMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("TransportMesh")); TransportMesh->SetupAttachment(this); TransportMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    WaterMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("WaterMesh")); WaterMesh->SetupAttachment(this); WaterMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision); WaterMesh->bVisibleInRayTracing = false;
+    FloraMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("FloraMesh")); FloraMesh->SetupAttachment(this); FloraMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision); FloraMesh->bVisibleInRayTracing = false;
+    TransportMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("TransportMesh")); TransportMesh->SetupAttachment(this); TransportMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision); TransportMesh->bVisibleInRayTracing = false;
 
     FaunaHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("FaunaHISM"));
     FaunaHISM->SetupAttachment(this); FaunaHISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -400,7 +402,6 @@ void UWorldRenderer::RenderChunk_GameThread(TSharedPtr<FChunkMeshData> MeshData,
 
     if (RenderedFlags & EChunkVisualDirty::Terrain || RenderedFlags & EChunkVisualDirty::TerrainColor) {
         if (TerrainMesh && MeshData->Vertices.Num() > 0) {
-            // OPTIMALIZACE: false místo true pro kolize uleví Game Threadu o desítky milisekund!
             TerrainMesh->CreateMeshSection_LinearColor(ChunkIndex, MeshData->Vertices, MeshData->Triangles, MeshData->Normals, MeshData->UV0, MeshData->VertexColors, TArray<FProcMeshTangent>(), false);
         }
     }
@@ -465,7 +466,6 @@ void UWorldRenderer::UpdateWeatherEntities()
         int32 ChunkSize = WorldManager->ChunkSize;
         float ChunkWorldSize = (ChunkSize - 1) * CellSize;
 
-        // OPTIMALIZACE: Chunk-Level Culling odstraní testování milionù bunìk u vzdálených chunkù
         FVector2D ChunkCenter = (ChunkCoord * ChunkWorldSize) + FVector2D(ChunkWorldSize * 0.5f, ChunkWorldSize * 0.5f);
         if (FVector2D::DistSquared(ChunkCenter, PlayerPos2D) > RenderDistSq + (ChunkWorldSize * ChunkWorldSize)) continue;
 
@@ -857,7 +857,6 @@ void UWorldRenderer::UpdateSettlementEntities()
         int32 PopPerHouse = 50;
         int32 MaxHouses = FMath::Clamp(FMath::FloorToInt((float)City.Population / PopPerHouse), 1, 150);
 
-        // OPTIMALIZACE: Vogel's Golden Spiral. Zcela odstraòuje O(N^2) kolizní check v cyklu.
         for (int h = 0; h < MaxHouses; h++) {
             float r = 14.0f * FMath::Sqrt((float)h);
             float theta = h * GoldenAngle;
