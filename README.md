@@ -4,7 +4,7 @@
 
 Procedurální simulace světa v Unreal Engine 5, zaměřená na emergentní chování přírody a civilizace.
 
-## Screenshoty ze simulace
+## Základ Simulace
 
 
 <img width="1536" height="1024" alt="Schéma systémů" src="https://github.com/user-attachments/assets/3c486f82-57c5-486c-9ecc-1e712004f90c" />
