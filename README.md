@@ -95,9 +95,9 @@ Projekt dále využívá principy jako:
 
 ## Emergentní chování
 
-NaturalSIM není založen pouze na předem připravených událostech.
+NaturalSIM není založen vůbec na předem připravených událostech.
 
-Jednotlivé systémy mají vlastní pravidla a jejich vzájemná interakce může vytvářet dlouhodobé důsledky, které nemusí být konkrétně definované jako samostatný scénář.
+Jednotlivé systémy mají vlastní pravidla a jejich vzájemná interakce může vytvářet dlouhodobé důsledky, které nejsou konkrétně definované jako samostatný scénář.
 
 Například změna prostředí může ovlivnit dostupnost potravy, ta může změnit pohyb populace, následně vznik nového osídlení a později další vývoj civilizace.
 
