@@ -2,7 +2,7 @@
 
 # NaturalSIM — Architecture
 
-Procedurální simulace světa v Unreal Engine 5 (C++).
+Procedurální simulace světa v Unreal Engine 5, zaměřená na emergentní chování přírody a civilizace.
 
 ## Screenshoty ze simulace
 
