@@ -142,6 +142,7 @@ NaturalSIM je experiment s otázkou, co se stane, když dostaneme jednotlivým s
 
 Místo předem napsaného příběhu vzniká prostor, ve kterém může příběh vzniknout z vývoje samotného světa.
 
+---
 
 ## Copyright & Licence
 
