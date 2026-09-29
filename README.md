@@ -141,3 +141,12 @@ Nejsem profesionální C++ programátor. Moje hlavní role spočívá v návrhu 
 NaturalSIM je experiment s otázkou, co se stane, když dostaneme jednotlivým systémům vlastní pravidla, data a vzájemné vazby a necháme je dlouhodobě působit jeden na druhý.
 
 Místo předem napsaného příběhu vzniká prostor, ve kterém může příběh vzniknout z vývoje samotného světa.
+
+
+## Copyright & Licence
+
+© 2026 Petr Remeš. Všechna práva vyhrazena / All rights reserved.
+
+Tento repozitář slouží výhradně jako osobní portfolio a ukázka systémové architektury. Zdrojový kód, strukturu, vizuální materiály ani herní koncepty nelze kopírovat, distribuovat, upravovat nebo komerčně využívat bez výslovného souhlasu autora.
+
+*This repository serves strictly as a personal portfolio and architectural showcase. The source code, structure, visual assets, and game concepts may not be copied, distributed, modified, or used for commercial purposes without explicit permission.*
