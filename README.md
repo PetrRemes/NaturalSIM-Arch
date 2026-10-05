@@ -12,6 +12,13 @@ Klima ovlivňuje prostředí, prostředí ovlivňuje flóru a faunu, dostupnost 
 
 ---
 
+### 🎬 Videopředstavení projektu a architektury
+*Pro rychlé pochopení logiky projektu, optimalizace a ukázku běžícího prototypu doporučuji zhlédnout toto krátké představení:*
+
+[![NaturalSim - Představení](https://img.youtube.com/vi/hlnHsbXkwEY/maxresdefault.jpg)](https://www.youtube.com/watch?v=hlnHsbXkwEY)
+
+---
+
 ## Základ simulace
 
 <img width="1536" height="1024" alt="Schéma systémů" src="https://github.com/user-attachments/assets/3c486f82-57c5-486c-9ecc-1e712004f90c" />
