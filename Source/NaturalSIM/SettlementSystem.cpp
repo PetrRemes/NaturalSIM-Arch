@@ -1,3 +1,7 @@
+============================================================
+SOUBOR: .\SettlementSystem.cpp
+============================================================
+
 #include "SettlementSystem.h"
 #include "SimWorldManager.h"
 #include "ManaSystem.h"
@@ -143,7 +147,9 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
         int32 TargetMines = bCanMine ? FMath::Max(1, LocalCity.Population / 60) : 0;
         int32 TargetBlacksmiths = bCanSmelt && !bCanIndustry ? FMath::Max(1, LocalCity.Population / 100) : 0;
         int32 TargetMarkets = bCanTrade ? FMath::Max(1, LocalCity.Population / 150) : 0;
-        int32 TargetLogistics = (bCanTrade && LocalCity.Population > 1000) ? FMath::Max(1, LocalCity.Population / 1000) : 0;
+
+        // Logistická centra nyní stavíme už od 250 obyvatel namísto 1000 a ve vìtším poètu
+        int32 TargetLogistics = bCanTrade ? FMath::Max(1, LocalCity.Population / 250) : 0;
 
         int32 TargetCastles = bCanDefend ? 1 : 0;
         int32 TargetPorts = bCanSail ? FMath::Max(1, LocalCity.Population / 500) : 0;
@@ -611,10 +617,10 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
             City.Inventory.Tools -= MaintenanceTools;
         }
         else {
-            ToolBonus *= 0.2f;
-            City.Inventory.Wealth = FMath::Max(0.0f, City.Inventory.Wealth - MaintenanceWealth);
-            City.Inventory.Tools = FMath::Max(0.0f, City.Inventory.Tools - MaintenanceTools);
-            City.EcologicalPressure += 10.0f * DeltaTime;
+            ToolBonus *= 0.6f; // Mírnìjší propad, osada se z toho snáz vzpamatuje
+            City.Inventory.Wealth = FMath::Max(0.0f, City.Inventory.Wealth - MaintenanceWealth * 0.5f);
+            City.Inventory.Tools = FMath::Max(0.0f, City.Inventory.Tools - MaintenanceTools * 0.5f);
+            City.EcologicalPressure += 3.0f * DeltaTime; // Místo pùvodních 10.0f roste tlak mnohem pomaleji
         }
 
         float DayPollution = 0.0f;
@@ -807,7 +813,8 @@ void USettlementSystem::ProcessSettlements(TMap<FIntPoint, FChunkData>& WorldChu
         City.Inventory.Weapons += WeaponsProduced;
         City.Inventory.Wealth += WealthProduced;
 
-        float LogisticsBonus = Work.NumLogisticsCenters * 10000.0f;
+        // Vìtší kapacita pro sklady z 10000.0 na 25000.0
+        float LogisticsBonus = Work.NumLogisticsCenters * 25000.0f;
         float MaxFood = (City.Population * 100.0f) + LogisticsBonus;
         float MaxWood = (City.Population * 50.0f) + LogisticsBonus;
         float MaxStone = (City.Population * 50.0f) + LogisticsBonus;
@@ -1012,10 +1019,13 @@ void USettlementSystem::ProcessDailyDemographics(ASimWorldManager* Manager) {
         float HealthCareBonus = 0.0f;
         if (City.Knowledge.UnlockedTechnologies.Contains("Sustainable Infrastructure")) HealthCareBonus = 0.08f;
 
-        float PollutionSicknessRate = FMath::Clamp((City.EcologicalPressure / 1000.0f) - HealthCareBonus, 0.0f, 0.1f);
+        // --- ÚPRAVA PØEŽITÍ: Vìtší populace je odolnìjší proti úplnému zhroucení ---
+        float PopResilience = FMath::Clamp(300.0f / FMath::Max(1.0f, (float)City.Population), 0.15f, 1.0f);
+
+        float PollutionSicknessRate = FMath::Clamp((City.EcologicalPressure / 1000.0f) - HealthCareBonus, 0.0f, 0.1f) * PopResilience;
 
         if (FoodReserve <= 0.0f) {
-            float StarvationRate = 0.50f / 365.0f;
+            float StarvationRate = (0.50f * PopResilience) / 365.0f;
             float RawDeaths = City.Population * (StarvationRate + PollutionSicknessRate);
             int32 Deaths = FMath::FloorToInt(RawDeaths); if (FMath::FRand() < FMath::Fmod(RawDeaths, 1.0f)) Deaths++;
             int32 ActualDeaths = FMath::Max(1, Deaths);
