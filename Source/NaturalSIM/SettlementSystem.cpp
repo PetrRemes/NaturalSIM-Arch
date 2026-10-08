@@ -1,6 +1,4 @@
-============================================================
-SOUBOR: .\SettlementSystem.cpp
-============================================================
+
 
 #include "SettlementSystem.h"
 #include "SimWorldManager.h"
